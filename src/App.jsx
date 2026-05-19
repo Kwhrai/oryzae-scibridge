@@ -1,20 +1,21 @@
 import React, { useState, useMemo } from 'react';
-import { 
-  Database, 
-  ShieldAlert, 
-  BookOpen, 
-  Copy, 
-  CheckCircle, 
-  Plus, 
-  Search, 
-  Bookmark, 
+import {
+  Database,
+  ShieldAlert,
+  BookOpen,
+  Copy,
+  CheckCircle,
+  Plus,
+  Search,
+  Bookmark,
   BookmarkCheck,
   MessageSquare,
   Lightbulb,
   HeartPulse,
   Info,
   ExternalLink,
-  FileText
+  FileText,
+  Trash2
 } from 'lucide-react';
 
 // スプレッドシート連携を模した初期論文データベース
@@ -161,6 +162,14 @@ export default function App() {
     triggerToast(`新しいジャンル「${formattedGenre}」を追加しました！`);
   };
 
+  // 論文削除
+  const handleDeletePaper = (id) => {
+    if (!window.confirm("この論文をデータベースから削除しますか？")) return;
+    setPapers(papers.filter(p => p.id !== id));
+    setBookmarks(bookmarks.filter(b => b !== id));
+    triggerToast("論文を削除しました");
+  };
+
   const toggleBookmark = (id) => {
     if (bookmarks.includes(id)) {
       setBookmarks(bookmarks.filter(b => b !== id));
@@ -278,7 +287,6 @@ export default function App() {
                 <h1 className="text-base font-black text-slate-900 tracking-wider">ORYZAE SciBridge</h1>
                 <span className="bg-[#4682B4]/10 text-[#4682B4] border border-[#4682B4]/20 text-[9px] font-bold px-1.5 py-0.5 rounded">R&D × Marketing</span>
               </div>
-              <p className="text-[10px] text-slate-500">R&D論文エビデンス翻訳 ＆ 薬機法ガードレール・共用プラットフォーム</p>
             </div>
           </div>
 
@@ -300,6 +308,11 @@ export default function App() {
           </nav>
         </div>
       </header>
+
+      {/* サブタイトル（ヘッダーの下・スクロールしない） */}
+      <div className="bg-slate-100 border-b border-slate-200 py-1.5 text-center">
+        <p className="text-[10px] text-slate-500">R&D論文エビデンス翻訳 ＆ 薬機法ガードレール・共用プラットフォーム</p>
+      </div>
 
       {/* メインレイアウトエリア */}
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 flex flex-col gap-6">
@@ -396,14 +409,21 @@ export default function App() {
                             </h3>
                           </div>
 
-                          {/* お気に入り追加ピン */}
+                          {/* お気に入り＆削除ボタン */}
                           <div className="flex items-center gap-2 shrink-0 self-start sm:self-center">
-                            <button 
+                            <button
                               onClick={() => toggleBookmark(paper.id)}
                               className={`p-2 rounded-lg border transition ${isBookmarked ? 'bg-[#4682B4]/10 text-[#4682B4] border-[#4682B4]/20' : 'bg-white text-slate-400 border-slate-200 hover:text-slate-600 hover:bg-slate-50'}`}
                               title="お気に入りに登録"
                             >
                               {isBookmarked ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                            </button>
+                            <button
+                              onClick={() => handleDeletePaper(paper.id)}
+                              className="p-2 rounded-lg border bg-white text-slate-300 border-slate-200 hover:text-red-500 hover:border-red-200 hover:bg-red-50 transition"
+                              title="この論文を削除"
+                            >
+                              <Trash2 className="h-4 w-4" />
                             </button>
                           </div>
                         </div>
