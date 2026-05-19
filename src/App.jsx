@@ -18,8 +18,8 @@ import {
   Trash2
 } from 'lucide-react';
 
-// ✅ GoogleスプレッドシートのCSV公開URL
-const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwwQGSk-03xlWiEFlXigyWFDNgAGYVY0nFEgTDbPl1sUXpdjib9B045su--DuayV02RyJTK9dAWb6r/pub?gid=0&single=true&output=csv";
+// ✅ プロジェクト内のCSVファイルを読み込む（Google Sheets不要）
+const CSV_URL = "/papers.csv";
 
 // CSVテキストを行・列に分解するパーサー
 const parseCSV = (text) => {
@@ -169,13 +169,10 @@ export default function App() {
   useEffect(() => {
     fetch(CSV_URL)
       .then(res => {
-        // HTMLが返ってきた場合（公開切れ）はエラー扱い
-        const ct = res.headers.get('content-type') || '';
-        if (ct.includes('text/html')) throw new Error('not_csv');
+        if (!res.ok) throw new Error('fetch_failed');
         return res.text();
       })
       .then(text => {
-        if (text.trim().startsWith('<')) throw new Error('not_csv');
         const fetched = parseCSV(text);
         if (fetched.length > 0) {
           setPapers(fetched);
