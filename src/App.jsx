@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Database,
   ShieldAlert,
@@ -18,7 +18,65 @@ import {
   Trash2
 } from 'lucide-react';
 
-// スプレッドシート連携を模した初期論文データベース
+// ✅ GoogleスプレッドシートのCSV公開URL
+const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwwQGSk-03xlWiEFlXigyWFDNgAGYVY0nFEgTDbPl1sUXpdjib9B045su--DuayV02RyJTK9dAWb6r/pub?gid=0&single=true&output=csv";
+
+// CSVテキストを行・列に分解するパーサー
+const parseCSV = (text) => {
+  const lines = text.split('\n').filter(l => l.trim());
+  if (lines.length < 3) return []; // ヘッダー行2行 + データ行がなければ空
+
+  // 1行目がA列B列…の説明行、2行目が実際のヘッダー
+  const headers = lines[1].split(',').map(h => h.replace(/"/g, '').trim());
+
+  return lines.slice(2).map((line, index) => {
+    // クォート内のカンマを無視して分割する
+    const values = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '"') { inQuotes = !inQuotes; }
+      else if (line[i] === ',' && !inQuotes) { values.push(current); current = ''; }
+      else { current += line[i]; }
+    }
+    values.push(current);
+
+    const row = {};
+    headers.forEach((h, i) => { row[h] = (values[i] || '').trim(); });
+
+    // url列のJSONをパース（{"ncbi":"...","drive":"..."}）
+    let ncbiUrl = '', driveUrl = '';
+    try {
+      const urlObj = JSON.parse(row.url || '{}');
+      ncbiUrl = urlObj.ncbi || '';
+      driveUrl = urlObj.drive || '';
+    } catch { ncbiUrl = row.url || ''; }
+
+    return {
+      id: row.id || `paper-${index + 1}`,
+      title: row.title || '',
+      author: row.reference || '',
+      category: row.category || '',
+      ncbiUrl,
+      driveUrl,
+      abstract: row.abstract || '',
+      citation: row.reference || '',
+      implications: row.commentary || '',
+      marketingUseCases: [
+        { channel: "CRM領域でどう活かせる？", idea: row.crm || '' },
+        { channel: "メルマガ/LINE配信時の使い方ポイント", idea: row.lineP || '' }
+      ],
+      yakkihou: {
+        rdFact: row.yakki || '',
+        dangerZone: '',
+        safeExpression: '',
+        storyGuide: ''
+      }
+    };
+  }).filter(p => p.title); // タイトルが空の行を除外
+};
+
+// サンプルデータ（スプレッドシートが読み込まれるまでの初期表示）
 const INITIAL_PAPERS = [
   {
     id: "paper-001",
@@ -105,7 +163,26 @@ const INITIAL_PAPERS = [
 
 export default function App() {
   const [papers, setPapers] = useState(INITIAL_PAPERS);
-  
+  const [loading, setLoading] = useState(true);
+
+  // ✅ アプリ起動時にスプレッドシートからデータを取得
+  useEffect(() => {
+    fetch(CSV_URL)
+      .then(res => res.text())
+      .then(text => {
+        const fetched = parseCSV(text);
+        if (fetched.length > 0) {
+          setPapers(fetched);
+          const cats = [...new Set(fetched.map(p => p.category).filter(Boolean))];
+          setCategories(cats);
+        }
+      })
+      .catch(() => {
+        // 取得失敗時はサンプルデータをそのまま表示
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
   // 動的ジャンル管理用State
   const [categories, setCategories] = useState(["腸活・バリア機能", "エイジングケア・シニア", "睡眠・メンタル・血圧"]);
   const [newGenre, setNewGenre] = useState("");
@@ -257,6 +334,16 @@ export default function App() {
     
     setActiveTab("database");
   };
+
+  // ローディング中の表示
+  if (loading) return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+      <div className="text-center space-y-3">
+        <Database className="h-10 w-10 text-[#4682B4] mx-auto animate-pulse" />
+        <p className="text-sm font-bold text-slate-600">スプレッドシートからデータを読み込み中...</p>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans antialiased">
