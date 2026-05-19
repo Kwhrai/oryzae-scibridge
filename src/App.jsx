@@ -44,17 +44,12 @@ const parseCSV = (text) => {
     const row = {};
     headers.forEach((h, i) => { row[h] = (values[i] || '').trim(); });
 
-    // url列のJSONをパース（{"doi":"10.xxxx/xxxxx","drive":"..."}）
-    let doiUrl = '', driveUrl = '';
-    try {
-      const urlObj = JSON.parse(row.url || '{}');
-      const doi = urlObj.doi || urlObj.ncbi || ''; // ncbiは後方互換
-      // DOI番号またはフルURLを受け取り、https://doi.org/に変換
-      doiUrl = doi
-        ? (doi.startsWith('http') ? doi : 'https://doi.org/' + doi)
-        : '';
-      driveUrl = urlObj.drive || '';
-    } catch { doiUrl = ''; }
+    // doi列・drive列を直接読む（JSON不要でシンプル・確実）
+    const doiRaw = (row.doi || '').trim();
+    const doiUrl = doiRaw
+      ? (doiRaw.startsWith('http') ? doiRaw : 'https://doi.org/' + doiRaw)
+      : '';
+    const driveUrl = (row.drive || '').trim();
 
     return {
       id: row.id || `paper-${index + 1}`,
@@ -166,23 +161,32 @@ const INITIAL_PAPERS = [
 ];
 
 export default function App() {
-  const [papers, setPapers] = useState(INITIAL_PAPERS);
+  const [papers, setPapers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [csvError, setCsvError] = useState(false);
 
   // ✅ アプリ起動時にスプレッドシートからデータを取得
   useEffect(() => {
     fetch(CSV_URL)
-      .then(res => res.text())
+      .then(res => {
+        // HTMLが返ってきた場合（公開切れ）はエラー扱い
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('text/html')) throw new Error('not_csv');
+        return res.text();
+      })
       .then(text => {
+        if (text.trim().startsWith('<')) throw new Error('not_csv');
         const fetched = parseCSV(text);
         if (fetched.length > 0) {
           setPapers(fetched);
           const cats = [...new Set(fetched.map(p => p.category).filter(Boolean))];
           setCategories(cats);
+        } else {
+          setCsvError(true);
         }
       })
       .catch(() => {
-        // 取得失敗時はサンプルデータをそのまま表示
+        setCsvError(true);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -345,6 +349,36 @@ export default function App() {
       <div className="text-center space-y-3">
         <Database className="h-10 w-10 text-[#4682B4] mx-auto animate-pulse" />
         <p className="text-sm font-bold text-slate-600">スプレッドシートからデータを読み込み中...</p>
+      </div>
+    </div>
+  );
+
+  // CSV取得エラー時の表示
+  if (csvError) return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+      <div className="bg-white rounded-2xl border border-red-200 shadow-sm p-8 max-w-md w-full space-y-4">
+        <div className="flex items-center gap-3">
+          <ShieldAlert className="h-7 w-7 text-red-500 shrink-0" />
+          <h2 className="text-base font-black text-slate-900">スプレッドシートに接続できません</h2>
+        </div>
+        <p className="text-xs text-slate-600 leading-relaxed">
+          Googleスプレッドシートの「Webに公開」が切れているか、URLが変わっています。
+        </p>
+        <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-2 text-xs text-slate-700">
+          <p className="font-bold text-slate-800">📋 修正手順：</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>スプレッドシートを開く</li>
+            <li>「ファイル」→「共有」→「Webに公開」</li>
+            <li>「シート1 / CSV」を選んで「公開」ボタンを押す</li>
+            <li>このページをリロードする</li>
+          </ol>
+        </div>
+        <button
+          onClick={() => window.location.reload()}
+          className="w-full py-2 rounded-lg bg-[#4682B4] text-white text-xs font-bold hover:bg-[#4682B4]/90 transition"
+        >
+          リロードして再試行
+        </button>
       </div>
     </div>
   );
