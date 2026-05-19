@@ -24,12 +24,12 @@ const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwwQGSk-03xlWi
 // CSVテキストを行・列に分解するパーサー
 const parseCSV = (text) => {
   const lines = text.split('\n').filter(l => l.trim());
-  if (lines.length < 3) return []; // ヘッダー行2行 + データ行がなければ空
+  if (lines.length < 2) return []; // ヘッダー行1行 + データ行がなければ空
 
-  // 1行目がA列B列…の説明行、2行目が実際のヘッダー
-  const headers = lines[1].split(',').map(h => h.replace(/"/g, '').trim());
+  // 1行目がヘッダー行（id, category, title, ...）
+  const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
 
-  return lines.slice(2).map((line, index) => {
+  return lines.slice(1).map((line, index) => {
     // クォート内のカンマを無視して分割する
     const values = [];
     let current = '';
@@ -44,20 +44,24 @@ const parseCSV = (text) => {
     const row = {};
     headers.forEach((h, i) => { row[h] = (values[i] || '').trim(); });
 
-    // url列のJSONをパース（{"ncbi":"...","drive":"..."}）
-    let ncbiUrl = '', driveUrl = '';
+    // url列のJSONをパース（{"doi":"10.xxxx/xxxxx","drive":"..."}）
+    let doiUrl = '', driveUrl = '';
     try {
       const urlObj = JSON.parse(row.url || '{}');
-      ncbiUrl = urlObj.ncbi || '';
+      const doi = urlObj.doi || urlObj.ncbi || ''; // ncbiは後方互換
+      // DOI番号またはフルURLを受け取り、https://doi.org/に変換
+      doiUrl = doi
+        ? (doi.startsWith('http') ? doi : 'https://doi.org/' + doi)
+        : '';
       driveUrl = urlObj.drive || '';
-    } catch { ncbiUrl = row.url || ''; }
+    } catch { doiUrl = ''; }
 
     return {
       id: row.id || `paper-${index + 1}`,
       title: row.title || '',
       author: row.reference || '',
       category: row.category || '',
-      ncbiUrl,
+      doiUrl,
       driveUrl,
       abstract: row.abstract || '',
       citation: row.reference || '',
@@ -83,7 +87,7 @@ const INITIAL_PAPERS = [
     title: "熱処理耐性に優れた新規乳酸菌株（LP-99）の加熱殺菌飲料における安定性と腸内フローラ改善効果",
     author: "佐藤 健一、田中 美咲（乳酸菌応用研究所 / 2026年）",
     category: "腸活・バリア機能",
-    ncbiUrl: "https://pubmed.ncbi.nlm.nih.gov/38291045/", // NCBIダミーURL
+    doiUrl: "", // DOI URL（例: https://doi.org/10.xxxx/xxxxx）
     driveUrl: "https://drive.google.com/drive/folders/1A2B3C4D5E6F_example", // Google DriveダミーURL
     abstract: "120℃・30秒の極限熱処理下でも生存率85%以上を維持する新規乳酸菌株LP-99を分離。本研究では、100名の中高年男女を対象とした臨床試験において、LP-99を加熱配合した温スープを4週間毎日摂取させたところ、プラセボ群と比較して糞便中のビフィズス菌比率が約2.4倍に増加、さらに唾液中IgA抗体（ウイルスなどの侵入を防ぐ免疫指標）の分泌速度が有意（p<0.05）に向上することが確認された。また、風邪症候群の初期症状（喉の痛み、だるさ）の継続期間が平均1.8日短縮した。",
     citation: "Sato K., Tanaka M. (2026). Thermal stability and immunological efficacy of Lactobacillus plantarum strain LP-99 in heated beverage matrices. Journal of Food Science and Biotechnology, 45(2), 112-121.",
@@ -110,7 +114,7 @@ const INITIAL_PAPERS = [
     title: "大豆胚芽発酵物から単離した「アクティブペプチド-Soy22」の骨格筋萎縮抑制および筋タンパク質合成促進メカニズム",
     author: "高橋 誠、山本 祥子（素材機能探索グループ / 2025年）",
     category: "エイジングケア・シニア",
-    ncbiUrl: "https://pubmed.ncbi.nlm.nih.gov/37482910/",
+    doiUrl: "",
     driveUrl: "https://drive.google.com/drive/folders/2G3H4I5J6K7L_example",
     abstract: "加齢に伴う筋肉量低下（サルコペニア）を予防する食品成分の探索。大豆胚芽を特殊な乳酸菌で発酵させることで得られる「アクティブペプチド-Soy22」が、骨格筋細胞におけるmTORシグナル伝達経路を活性化し、筋タンパク質の合成を通常ペプチドの約1.8倍促進することをin vitro試験にて実証。さらに、50代後半〜70代の被験者40名を対象とした二重盲検比較試験において、Soy22（1日あたり500mg）の12週間摂取により、軽いウォーキングとの併用下で、大腿四頭筋の断面積がプラセボ群に比べ有意に増加（+4.2%）した。",
     citation: "Takahashi M., Yamamoto S. (2025). Soy germ-derived active peptide Soy22 stimulates muscle protein synthesis via mTOR pathway and prevents sarcopenia: A double-blind clinical trial. Nutrition & Metabolic Insights, 18, 54-63.",
@@ -137,7 +141,7 @@ const INITIAL_PAPERS = [
     title: "乳酸菌発酵トマト由来GABAの自律神経調整を介した睡眠の質改善および血管弾性維持効果",
     author: "渡辺 健二、鈴木 拓海（デジタルフードサイエンス部 / 2026年）",
     category: "睡眠・メンタル・血圧",
-    ncbiUrl: "https://pubmed.ncbi.nlm.nih.gov/39102485/",
+    doiUrl: "",
     driveUrl: "https://drive.google.com/drive/folders/3M4N5O6P7Q8R_example",
     abstract: "トマトに含まれるアミノ酸を乳酸菌発酵プロセスにより高濃度GABAへと変換。一時的な精神的ストレスを抱える被験者50名を対象にした脳波・心拍変動解析において、GABA（100mg/日）の就寝前摂取により、入眠初期 of 深睡眠（徐波睡眠）の時間が約35%延長し、自律神経のバランス（交感神経抑制/副交感神経活性化）が正常に調整されることが明らかとなった。長期摂取（8週間）により、血管の柔軟性（弾性）を示す血管硬化度の改善（p<0.01）および、高め血圧の有意な低下傾向も併せて確認された。",
     citation: "Watanabe K., Suzuki T. (2026). Lactobacilli-fermented tomato GABA improves deep sleep quality and arterial stiffness through autonomic nervous system modulation. Journal of Functional Foods, 104, 103950.",
@@ -203,7 +207,7 @@ export default function App() {
   const [newTitle, setNewTitle] = useState("");
   const [newAuthor, setNewAuthor] = useState("");
   const [newCategory, setNewCategory] = useState("腸活・バリア機能");
-  const [newNcbiUrl, setNewNcbiUrl] = useState("");
+  const [newDoi, setNewDoi] = useState("");
   const [newDriveUrl, setNewDriveUrl] = useState("");
   const [newAbstract, setNewAbstract] = useState("");
   const [newCitation, setNewCitation] = useState("");
@@ -290,7 +294,7 @@ export default function App() {
       title: newTitle,
       author: newAuthor || "R&D開発推進部 (2026年)",
       category: newCategory,
-      ncbiUrl: newNcbiUrl || "https://pubmed.ncbi.nlm.nih.gov/",
+      doiUrl: newDoi ? 'https://doi.org/' + newDoi.replace(/^https?:\/\/doi\.org\//, '') : '',
       driveUrl: newDriveUrl || "https://drive.google.com/",
       abstract: newAbstract,
       citation: newCitation || "R&D Internal Report (2026). unpublished database.",
@@ -320,7 +324,7 @@ export default function App() {
     // フォームクリア
     setNewTitle("");
     setNewAuthor("");
-    setNewNcbiUrl("");
+    setNewDoi("");
     setNewDriveUrl("");
     setNewAbstract("");
     setNewCitation("");
@@ -554,15 +558,15 @@ export default function App() {
                                 
                                 {/* 🔗 Googleスプレッドシート上の論文URLに直接飛ぶリンクボタン */}
                                 <div className="flex flex-wrap gap-2 self-start sm:self-center">
-                                  {paper.ncbiUrl && (
-                                    <a 
-                                      href={paper.ncbiUrl} 
-                                      target="_blank" 
+                                  {paper.doiUrl && (
+                                    <a
+                                      href={paper.doiUrl}
+                                      target="_blank"
                                       rel="noopener noreferrer"
                                       className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold bg-white text-slate-700 border border-slate-200 hover:border-slate-300 rounded-lg transition"
                                     >
                                       <ExternalLink className="h-3 w-3 text-[#4682B4]" />
-                                      NCBIで原文を読む
+                                      原文を読む
                                     </a>
                                   )}
                                   {paper.driveUrl && (
@@ -778,17 +782,18 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* スプシから読み込まれる論文URL欄（NCBI/Google Drive） */}
+                {/* 論文URL欄（DOI/Google Drive） */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1">NCBI 論文リンクURL（任意）</label>
-                    <input 
-                      type="url"
-                      value={newNcbiUrl}
-                      onChange={(e) => setNewNcbiUrl(e.target.value)}
-                      placeholder="https://pubmed.ncbi.nlm.nih.gov/xxxxxx/"
+                    <label className="block text-[10px] font-bold text-slate-500 mb-1">DOI番号（任意）</label>
+                    <input
+                      type="text"
+                      value={newDoi}
+                      onChange={(e) => setNewDoi(e.target.value)}
+                      placeholder="例: 10.3390/jof7090782"
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:border-[#4682B4] focus:bg-white transition"
                     />
+                    <p className="text-[10px] text-slate-400 mt-1">入力すると「原文を読む」リンクが自動生成されます</p>
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 mb-1">Google Drive 関連資料フォルダURL（任意）</label>
