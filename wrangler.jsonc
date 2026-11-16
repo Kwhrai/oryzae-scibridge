@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "oryzae-scibridge",
+  "compatibility_date": "2026-11-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "vinext/server/fetch-handler",
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  },
+  "vars": {
+    "ALLOWED_EMAIL_DOMAIN": "oryzae.site",
+    "DRIVE_ROOT_FOLDER_ID": "1f8kMQgoqvp9H0IIwzD6BAZ2-vcqIHHun",
+    "GEMINI_MODEL": "gemini-2.5-flash",
+    "GEMINI_EMBEDDING_MODEL": "gemini-embedding-001",
+    "LLM_PROVIDER": "auto",
+    "WORKERS_AI_MODEL": "@cf/meta/llama-3.1-8b-instruct",
+    "WORKERS_AI_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "scibridge",
+      "database_id": "3b221813-3db3-4bf6-8258-ad7380182a55",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "scibridge-papers"
+    }
+  ],
+  "assets": {
+    "directory": "dist/client",
+    "html_handling": "none",
+    "not_found_handling": "none",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/*",
+      "!/_next/static/*",
+      "!/*/_next/static/*"
+    ]
+  }
+}
