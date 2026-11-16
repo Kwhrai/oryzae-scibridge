@@ -1,5 +1,5 @@
 import { getContext } from "@/lib/context";
-import { requireUser } from "@/lib/auth/session";
+import { requireUser } from "@/lib/auth/current-user";
 import { AppError } from "@/lib/app-error";
 import { errorResponse, json } from "@/lib/http";
 

@@ -11,6 +11,9 @@ export default defineConfig({
     testTimeout: 30_000,
   },
   resolve: {
-    alias: { "@": root },
+    alias: {
+      "@": root,
+      "cloudflare:workers": path.resolve(root, "tests/stubs/cloudflare-workers.ts"),
+    },
   },
 });

@@ -34,5 +34,10 @@ next-env.d.ts
 *.sln
 *.sw?
 
-# Vercel
+# Vercel（旧ホスティング。このアプリはもうデプロイしない）
 .vercel
+.vinext/
+.wrangler/
+.dev.vars
+.agents/
+.cloudflare/

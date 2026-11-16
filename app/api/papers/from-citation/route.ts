@@ -1,5 +1,5 @@
 import { getContext } from "@/lib/context";
-import { requireUser } from "@/lib/auth/session";
+import { requireUser } from "@/lib/auth/current-user";
 import { errorResponse, json } from "@/lib/http";
 import { addCitation } from "@/lib/library";
 import type { CitationDraft } from "@/lib/metadata/crossref";

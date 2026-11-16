@@ -1,12 +1,12 @@
-import { randomUUID } from "node:crypto";
 import { AppError } from "@/lib/app-error";
-import { OPTIONAL_INDEX_STATEMENTS, SCHEMA_STATEMENTS } from "@/lib/db/schema";
-import { mapPaper, toVectorLiteral } from "@/lib/db/map";
-import type { Db, PaperDraft, PaperPatch, PaperRecord } from "@/lib/db/types";
+import { applyMigrations, type Sql } from "@/lib/db/sql";
+import { mapPaper } from "@/lib/db/map";
+import type { PaperDraft, PaperPatch, PaperRecord } from "@/lib/db/types";
 import type { MigratedPaper } from "@/lib/papers/csv";
 import { buildSearchText, likePattern, queryTokens, snippetAround } from "@/lib/papers/text";
 import { keywordScore, mergeScores } from "@/lib/papers/rank";
 import { normalizeDoi } from "@/lib/papers/doi";
+import type { VectorIndex } from "@/lib/vectors";
 
 const PAPER_COLUMNS = `
   p.id, p.legacy_id, p.title, p.authors, p.year, p.journal, p.doi, p.abstract, p.reference,
@@ -15,12 +15,11 @@ const PAPER_COLUMNS = `
   p.created_at, p.updated_at
 `;
 
-function selectPapers(extra: string): string {
+function selectPapers(): string {
   return `
     SELECT ${PAPER_COLUMNS},
-      EXISTS (SELECT 1 FROM bookmarks b WHERE b.paper_id = p.id AND b.user_email = $USER) AS bookmarked,
-      EXISTS (SELECT 1 FROM paper_chunks c WHERE c.paper_id = p.id) AS has_embedding
-      ${extra}
+      EXISTS (SELECT 1 FROM bookmarks b WHERE b.paper_id = p.id AND b.user_email = ?) AS bookmarked,
+      p.embedded AS has_embedding
     FROM papers p
   `;
 }
@@ -45,6 +44,14 @@ function searchTextOf(input: PaperDraft | PaperRecord): string {
   ]);
 }
 
+function bit(value: boolean | undefined): number {
+  return value ? 1 : 0;
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
+
 export type PaperStore = {
   ensureSchema(): Promise<void>;
   stats(): Promise<{ total: number; embedded: number; withPdf: number }>;
@@ -61,44 +68,33 @@ export type PaperStore = {
   listMissingEmbeddings(limit: number): Promise<{ id: string; title: string; searchText: string; pdfText: string }[]>;
 };
 
-export function createPaperStore(db: Db): PaperStore {
+export function createPaperStore(sql: Sql, vectors: VectorIndex): PaperStore {
   let ready = false;
 
   async function ensureSchema() {
     if (ready) return;
     try {
-      for (const statement of SCHEMA_STATEMENTS) await db.query(statement);
+      await applyMigrations(sql);
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      if (/vector/i.test(message)) {
-        throw new AppError("Postgres に pgvector がありません。Neon の SQL エディタで CREATE EXTENSION vector; を実行してください。", 503, "setup");
-      }
-      throw error;
-    }
-    for (const statement of OPTIONAL_INDEX_STATEMENTS) {
-      try {
-        await db.query(statement);
-      } catch (error) {
-        console.warn("ベクトル索引を作れませんでした。検索は続行します。", error);
-      }
+      throw new AppError(`D1 のテーブルを用意できませんでした。${message}`, 503, "setup");
     }
     ready = true;
   }
 
   async function get(id: string, userEmail: string): Promise<PaperRecord | null> {
-    const sql = selectPapers("").replace("$USER", "$2") + " WHERE p.id = $1";
-    const rows = await db.query<Record<string, unknown>>(sql, [id, userEmail]);
+    const rows = await sql.all<Record<string, unknown>>(`${selectPapers()} WHERE p.id = ?`, [userEmail, id]);
     return rows[0] ? mapPaper(rows[0]) : null;
   }
 
   return {
     ensureSchema,
     async stats() {
-      const [row] = await db.query<{ total: number; embedded: number; with_pdf: number }>(`
+      const [row] = await sql.all<{ total: number; embedded: number; with_pdf: number }>(`
         SELECT
-          (SELECT COUNT(*)::int FROM papers) AS total,
-          (SELECT COUNT(DISTINCT paper_id)::int FROM paper_chunks) AS embedded,
-          (SELECT COUNT(*)::int FROM papers WHERE pdf_text <> '' OR drive_file_id IS NOT NULL) AS with_pdf
+          (SELECT COUNT(*) FROM papers) AS total,
+          (SELECT COUNT(*) FROM papers WHERE embedded = 1) AS embedded,
+          (SELECT COUNT(*) FROM papers WHERE pdf_text <> '' OR drive_file_id IS NOT NULL) AS with_pdf
       `);
       return {
         total: Number(row?.total ?? 0),
@@ -107,14 +103,15 @@ export function createPaperStore(db: Db): PaperStore {
       };
     },
     async categories() {
-      const rows = await db.query<{ category: string; count: number }>(
-        "SELECT category, COUNT(*)::int AS count FROM papers GROUP BY category ORDER BY count DESC, category",
+      const rows = await sql.all<{ category: string; count: number }>(
+        "SELECT category, COUNT(*) AS count FROM papers GROUP BY category ORDER BY count DESC, category",
       );
       return rows.map((row) => ({ name: row.category, count: Number(row.count) }));
     },
     async seedMigrated(papers) {
       await ensureSchema();
       let inserted = 0;
+      const timestamp = now();
       for (const paper of papers) {
         const id = `csv-${paper.legacyId}`;
         const searchText = searchTextOf({
@@ -126,14 +123,11 @@ export function createPaperStore(db: Db): PaperStore {
           crmNote: paper.crmNote,
           doi: paper.doi,
         });
-        const rows = await db.query<{ id: string }>(
+        const rows = await sql.all<{ id: string }>(
           `INSERT INTO papers (
             id, legacy_id, title, abstract, reference, category, rd_note, crm_note, line_plan, yakki,
-            doi, drive_url, drive_file_id, year, search_text, source
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13, $14, $15, 'csv'
-          )
+            doi, drive_url, drive_file_id, year, search_text, source, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', ?, ?)
           ON CONFLICT (legacy_id) DO NOTHING
           RETURNING id`,
           [
@@ -145,13 +139,15 @@ export function createPaperStore(db: Db): PaperStore {
             paper.category,
             paper.rdNote,
             paper.crmNote,
-            paper.linePlan,
-            paper.yakki,
+            bit(paper.linePlan),
+            bit(paper.yakki),
             paper.doi,
             paper.driveUrl,
             paper.driveFileId,
             paper.year,
             searchText,
+            timestamp,
+            timestamp,
           ],
         );
         if (rows[0]) inserted += 1;
@@ -168,10 +164,12 @@ export function createPaperStore(db: Db): PaperStore {
         let where = "";
         if (category) {
           params.push(category);
-          where = ` WHERE p.category = $${params.length}`;
+          where = " WHERE p.category = ?";
         }
-        const sql = selectPapers("").replace("$USER", "$1") + where + " ORDER BY p.year DESC NULLS LAST, p.updated_at DESC LIMIT " + String(safeLimit);
-        const rows = await db.query<Record<string, unknown>>(sql, params);
+        const rows = await sql.all<Record<string, unknown>>(
+          `${selectPapers()}${where} ORDER BY (p.year IS NULL), p.year DESC, p.updated_at DESC LIMIT ${safeLimit}`,
+          params,
+        );
         return { papers: rows.map((row) => mapPaper(row)), mode: "browse" as const };
       }
 
@@ -179,49 +177,46 @@ export function createPaperStore(db: Db): PaperStore {
       const tokenClauses: string[] = [];
       for (const token of tokens) {
         keywordParams.push(likePattern(token));
-        tokenClauses.push(`p.search_text ILIKE $${keywordParams.length} ESCAPE '\\'`);
+        tokenClauses.push("p.search_text LIKE ? ESCAPE '\\'");
       }
-      let keywordSql = selectPapers("").replace("$USER", "$1");
       const filters: string[] = [];
       if (category) {
         keywordParams.push(category);
-        filters.push(`p.category = $${keywordParams.length}`);
+        filters.push("p.category = ?");
       }
       if (tokenClauses.length) filters.push(`(${tokenClauses.join(" OR ")})`);
-      if (filters.length) keywordSql += ` WHERE ${filters.join(" AND ")}`;
-      keywordSql += " LIMIT 80";
-      const keywordRows = tokens.length
-        ? await db.query<Record<string, unknown>>(keywordSql, keywordParams)
+      const keywordSql = `${selectPapers()}${filters.length ? ` WHERE ${filters.join(" AND ")}` : ""} LIMIT 80`;
+      const keywordPapers = tokens.length
+        ? (await sql.all<Record<string, unknown>>(keywordSql, keywordParams)).map((row) => mapPaper(row))
         : [];
-      const keywordPapers = keywordRows.map((row) => mapPaper(row));
 
       let vectorScores: { id: string; score: number }[] = [];
       if (embedding) {
-        const params: unknown[] = [toVectorLiteral(embedding)];
-        let categorySql = "";
-        if (category) {
-          params.push(category);
-          categorySql = ` AND p.category = $${params.length}`;
+        try {
+          const hits = await vectors.query(embedding, 30);
+          vectorScores = hits
+            .filter((hit) => Number.isFinite(hit.score))
+            .map((hit) => ({ id: hit.paperId, score: hit.score }));
+        } catch (error) {
+          console.error(error);
+          vectorScores = [];
         }
-        const rows = await db.query<{ paper_id: string; score: number }>(
-          `SELECT c.paper_id, MAX(1 - (c.embedding <=> $1::vector)) AS score
-           FROM paper_chunks c
-           JOIN papers p ON p.id = c.paper_id
-           WHERE TRUE ${categorySql}
-           GROUP BY c.paper_id
-           ORDER BY score DESC
-           LIMIT 30`,
-          params,
-        );
-        vectorScores = rows.map((row) => ({ id: row.paper_id, score: Number(row.score) })).filter((row) => Number.isFinite(row.score));
       }
 
       const byId = new Map(keywordPapers.map((paper) => [paper.id, paper]));
       const missing = vectorScores.map((item) => item.id).filter((id) => !byId.has(id));
       if (missing.length) {
-        const placeholders = missing.map((_, index) => `$${index + 2}`).join(", ");
-        const sql = selectPapers("").replace("$USER", "$1") + ` WHERE p.id IN (${placeholders})`;
-        const rows = await db.query<Record<string, unknown>>(sql, [userEmail, ...missing]);
+        const params: unknown[] = [userEmail, ...missing];
+        let extra = "";
+        if (category) {
+          params.push(category);
+          extra = " AND p.category = ?";
+        }
+        const placeholders = missing.map(() => "?").join(", ");
+        const rows = await sql.all<Record<string, unknown>>(
+          `${selectPapers()} WHERE p.id IN (${placeholders})${extra}`,
+          params,
+        );
         for (const row of rows) {
           const paper = mapPaper(row);
           byId.set(paper.id, paper);
@@ -232,11 +227,12 @@ export function createPaperStore(db: Db): PaperStore {
         id: paper.id,
         score: keywordScore(tokens, phrase, paper.searchText),
       })).filter((item) => item.score > 0);
-      const merged = mergeScores(keywordRanked, vectorScores);
+      const merged = mergeScores(keywordRanked, vectorScores.map((item) => ({ id: item.id, score: item.score })));
       const mode = embedding && vectorScores.length ? "hybrid" as const : "keyword" as const;
       const papers = merged.slice(0, safeLimit).flatMap((item) => {
         const paper = byId.get(item.id);
         if (!paper) return [];
+        if (category && paper.category !== category) return [];
         return [{
           ...paper,
           score: item.score,
@@ -249,14 +245,14 @@ export function createPaperStore(db: Db): PaperStore {
     async findByDoi(doi) {
       const normalized = normalizeDoi(doi);
       if (!normalized) return null;
-      const rows = await db.query<{ id: string; title: string }>(
-        "SELECT id, title FROM papers WHERE lower(doi) = lower($1) LIMIT 1",
+      const rows = await sql.all<{ id: string; title: string }>(
+        "SELECT id, title FROM papers WHERE lower(doi) = lower(?) LIMIT 1",
         [normalized],
       );
       return rows[0] ?? null;
     },
     async listForDriveMatch() {
-      const rows = await db.query<{ id: string; title: string; doi: string; drive_file_id: string | null }>(
+      const rows = await sql.all<{ id: string; title: string; doi: string; drive_file_id: string | null }>(
         "SELECT id, title, doi, drive_file_id FROM papers",
       );
       return rows.map((row) => ({
@@ -268,17 +264,18 @@ export function createPaperStore(db: Db): PaperStore {
     },
     async insert(input) {
       await ensureSchema();
-      const id = randomUUID();
+      const id = crypto.randomUUID();
+      const timestamp = now();
       const searchText = searchTextOf(input);
-      await db.query(
+      await sql.run(
         `INSERT INTO papers (
           id, legacy_id, title, authors, year, journal, doi, abstract, reference, category,
           background, objective, methods, results, discussion, rd_note, crm_note, line_plan, yakki,
-          drive_file_id, drive_url, pdf_text, search_text, source, confirmed
+          drive_file_id, drive_url, pdf_text, search_text, source, confirmed, created_at, updated_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-          $11,$12,$13,$14,$15,$16,$17,$18,$19,
-          $20,$21,$22,$23,$24,$25
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?
         )`,
         [
           id,
@@ -298,14 +295,16 @@ export function createPaperStore(db: Db): PaperStore {
           input.discussion ?? "",
           input.rdNote ?? "",
           input.crmNote ?? "",
-          input.linePlan ?? false,
-          input.yakki ?? false,
+          bit(input.linePlan),
+          bit(input.yakki),
           input.driveFileId || null,
           input.driveUrl ?? "",
           input.pdfText ?? "",
           searchText,
           input.source ?? "manual",
-          input.confirmed ?? false,
+          bit(input.confirmed),
+          timestamp,
+          timestamp,
         ],
       );
       const created = await get(id, "");
@@ -322,16 +321,14 @@ export function createPaperStore(db: Db): PaperStore {
         category: patch.category != null ? patch.category.trim() || "未分類" : current.category,
         driveFileId: patch.driveFileId !== undefined ? patch.driveFileId || null : current.driveFileId,
       };
-      const searchText = searchTextOf(next);
-      await db.query(
+      await sql.run(
         `UPDATE papers SET
-          title = $2, authors = $3, year = $4, journal = $5, doi = $6, abstract = $7, reference = $8,
-          category = $9, background = $10, objective = $11, methods = $12, results = $13, discussion = $14,
-          rd_note = $15, crm_note = $16, line_plan = $17, yakki = $18, drive_file_id = $19, drive_url = $20,
-          pdf_text = $21, search_text = $22, confirmed = $23, updated_at = NOW()
-         WHERE id = $1`,
+          title = ?, authors = ?, year = ?, journal = ?, doi = ?, abstract = ?, reference = ?,
+          category = ?, background = ?, objective = ?, methods = ?, results = ?, discussion = ?,
+          rd_note = ?, crm_note = ?, line_plan = ?, yakki = ?, drive_file_id = ?, drive_url = ?,
+          pdf_text = ?, search_text = ?, confirmed = ?, updated_at = ?
+         WHERE id = ?`,
         [
-          id,
           next.title,
           next.authors,
           next.year,
@@ -347,13 +344,15 @@ export function createPaperStore(db: Db): PaperStore {
           next.discussion,
           next.rdNote,
           next.crmNote,
-          next.linePlan,
-          next.yakki,
+          bit(next.linePlan),
+          bit(next.yakki),
           next.driveFileId,
           next.driveUrl,
           next.pdfText,
-          searchText,
-          next.confirmed,
+          searchTextOf(next),
+          bit(next.confirmed),
+          now(),
+          id,
         ],
       );
       return get(id, "");
@@ -362,32 +361,38 @@ export function createPaperStore(db: Db): PaperStore {
       const existing = await get(id, userEmail);
       if (!existing) throw new AppError("論文が見つかりません", 404);
       if (bookmarked) {
-        await db.query(
-          "INSERT INTO bookmarks (user_email, paper_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-          [userEmail, id],
+        await sql.run(
+          "INSERT INTO bookmarks (user_email, paper_id, created_at) VALUES (?, ?, ?) ON CONFLICT (user_email, paper_id) DO NOTHING",
+          [userEmail, id, now()],
         );
       } else {
-        await db.query("DELETE FROM bookmarks WHERE user_email = $1 AND paper_id = $2", [userEmail, id]);
+        await sql.run("DELETE FROM bookmarks WHERE user_email = ? AND paper_id = ?", [userEmail, id]);
       }
     },
     async replaceChunks(paperId, chunks) {
-      const queries = [
-        { text: "DELETE FROM paper_chunks WHERE paper_id = $1", params: [paperId] },
-        ...chunks.map((chunk, index) => ({
-          text: "INSERT INTO paper_chunks (id, paper_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4, $5::vector)",
-          params: [randomUUID(), paperId, index, chunk.content, toVectorLiteral(chunk.embedding)],
+      const existing = await sql.all<{ id: string }>("SELECT id FROM paper_vectors WHERE paper_id = ?", [paperId]);
+      const ids = chunks.map(() => crypto.randomUUID());
+      await sql.batch([
+        { sql: "DELETE FROM paper_vectors WHERE paper_id = ?", params: [paperId] },
+        ...ids.map((id, index) => ({
+          sql: "INSERT INTO paper_vectors (id, paper_id, chunk_index) VALUES (?, ?, ?)",
+          params: [id, paperId, index],
         })),
-      ];
-      await db.batch(queries);
+        { sql: "UPDATE papers SET embedded = 0 WHERE id = ?", params: [paperId] },
+      ]);
+      if (existing.length) await vectors.deleteByIds(existing.map((row) => row.id));
+      if (!chunks.length) return;
+      await vectors.upsert(chunks.map((chunk, index) => ({
+        id: ids[index]!,
+        values: chunk.embedding,
+        paperId,
+      })));
+      await sql.run("UPDATE papers SET embedded = 1 WHERE id = ?", [paperId]);
     },
     async listMissingEmbeddings(limit) {
-      const rows = await db.query<{ id: string; title: string; search_text: string; pdf_text: string }>(
-        `SELECT p.id, p.title, p.search_text, p.pdf_text
-         FROM papers p
-         WHERE NOT EXISTS (SELECT 1 FROM paper_chunks c WHERE c.paper_id = p.id)
-         ORDER BY p.created_at
-         LIMIT $1`,
-        [limit],
+      const rows = await sql.all<{ id: string; title: string; search_text: string; pdf_text: string }>(
+        `SELECT id, title, search_text, pdf_text FROM papers WHERE embedded = 0 ORDER BY created_at LIMIT ?`,
+        [Math.min(20, Math.max(1, Math.floor(limit)))],
       );
       return rows.map((row) => ({
         id: row.id,

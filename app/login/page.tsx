@@ -1,12 +1,11 @@
 import { FlaskConical } from "lucide-react";
-import { signIn } from "@/auth";
 import { authBypassEnabled } from "@/lib/config";
+import { runtimeEnv } from "@/lib/runtime-env";
 import { redirect } from "next/navigation";
 
 const errorCopy: Record<string, string> = {
   AccessDenied: "oryzae.site の Google アカウントだけが利用できます。",
   Configuration: "Google ログインの設定が未完了です。AUTH_GOOGLE_ID / AUTH_GOOGLE_SECRET / AUTH_SECRET を確認してください。",
-  OAuthSignin: "Google への接続を開始できませんでした。",
   OAuthCallback: "Google からの戻りに失敗しました。リダイレクト URL を確認してください。",
   Default: "ログインできませんでした。",
 };
@@ -14,9 +13,10 @@ const errorCopy: Record<string, string> = {
 export const dynamic = "force-dynamic";
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
-  if (authBypassEnabled()) redirect("/");
+  const env = await runtimeEnv();
+  if (authBypassEnabled(env)) redirect("/");
   const params = await searchParams;
-  const ready = Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET && process.env.AUTH_SECRET);
+  const ready = Boolean(env.AUTH_GOOGLE_ID && env.AUTH_GOOGLE_SECRET && env.AUTH_SECRET);
   const error = params.error ? (errorCopy[params.error] ?? errorCopy.Default) : null;
 
   return (
@@ -33,17 +33,10 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         <p className="muted">oryzae.site の Google アカウントで入ります。社外のアカウントや、ログインしていない状態では論文・メモ・Drive のリンクは見えません。</p>
         {error && <p className="error-banner">{error}</p>}
         {ready ? (
-          <form
-            action={async () => {
-              "use server";
-              await signIn("google", { redirectTo: "/" });
-            }}
-          >
-            <button className="primary-button" type="submit">Google でログイン</button>
-          </form>
+          <a className="primary-button" href="/api/auth/google">Google でログイン</a>
         ) : (
           <div className="warning-banner">
-            ログインの秘密情報がまだありません。docs/SETUP.md の Google OAuth と AUTH_SECRET を Vercel（または .env.local）に設定してください。
+            ログインの秘密情報がまだありません。docs/SETUP.md の Google OAuth と AUTH_SECRET を Cloudflare のシークレットに設定してください。
           </div>
         )}
       </section>

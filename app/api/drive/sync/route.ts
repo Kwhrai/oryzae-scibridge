@@ -1,5 +1,5 @@
 import { getContext } from "@/lib/context";
-import { requireUser } from "@/lib/auth/session";
+import { requireUser } from "@/lib/auth/current-user";
 import { errorResponse, json } from "@/lib/http";
 import { syncDrive } from "@/lib/library";
 
@@ -12,7 +12,7 @@ export async function POST() {
     const user = await requireUser();
     if (!user) return json({ error: "ログインが必要です" }, 401);
     const ctx = await getContext();
-    const result = await syncDrive(ctx, 2);
+    const result = await syncDrive(ctx, 1);
     return json(result);
   } catch (error) {
     return errorResponse(error);

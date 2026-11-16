@@ -11,7 +11,7 @@ import { embeddingDocuments } from "@/lib/papers/chunk";
 import type { ExtractedPaper } from "@/lib/papers/model-json";
 import { toDetail, toSummary, type PaperDetail, type PaperSummary } from "@/lib/papers/present";
 
-const PDF_LIMIT = 4_000_000;
+const PDF_LIMIT = 20 * 1024 * 1024;
 
 export type AppContext = {
   store: PaperStore;
@@ -122,7 +122,7 @@ function draftFromExtraction(extracted: ExtractedPaper, fallbackText: string): E
 
 export async function previewPdf(ctx: AppContext, bytes: Uint8Array, filename: string) {
   if (bytes.byteLength > PDF_LIMIT) {
-    throw new AppError("PDFが4MBを超えています。共有ドライブのフォルダに直接置いてから「Driveを同期」してください。", 413);
+    throw new AppError("PDFは20MBまでです。それより大きいファイルは共有ドライブに置いてから「Driveを同期」してください。", 413);
   }
   const text = await ctx.extractText(bytes);
   const categories = (await ctx.store.categories()).map((item) => item.name);
@@ -152,7 +152,7 @@ export async function previewPdf(ctx: AppContext, bytes: Uint8Array, filename: s
 
 async function storePdf(ctx: AppContext, bytes: Uint8Array, title: string, year: number | null, category: string): Promise<{ id: string; webViewLink: string } | { warning: string }> {
   if (bytes.byteLength > PDF_LIMIT) {
-    return { warning: "PDFが4MBを超えたため Drive には置いていません。フォルダへ直接入れて同期してください。" };
+    return { warning: "PDFは20MBまでです。それより大きいファイルは共有ドライブに置いてから同期してください。" };
   }
   if (!ctx.drive.configured) {
     return { warning: "Drive が未設定のため、PDFファイルはクラウドに置いていません。本文テキストだけ検索対象になります。" };
@@ -186,7 +186,7 @@ async function finishSave(ctx: AppContext, userEmail: string, id: string, driveS
 
 export async function addPdf(ctx: AppContext, userEmail: string, bytes: Uint8Array, _filename: string, meta: ExtractedPaper): Promise<SaveResult> {
   if (bytes.byteLength > PDF_LIMIT) {
-    throw new AppError("PDFが4MBを超えています。共有ドライブに直接置いてから同期してください。", 413);
+    throw new AppError("PDFは20MBまでです。それより大きいファイルは共有ドライブに置いてから同期してください。", 413);
   }
   const text = await safeText(ctx, bytes);
   const title = meta.title.trim();

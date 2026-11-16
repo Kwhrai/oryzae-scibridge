@@ -149,9 +149,9 @@ export function LibraryApp({
           <h1>準備がまだです</h1>
           <p className="muted">{error}</p>
           <ol className="muted">
-            <li>Neon に Postgres を作り、pgvector を有効にする</li>
-            <li>Vercel に DATABASE_URL を入れる</li>
-            <li>Google ログインと Drive、Gemini の鍵を入れる</li>
+            <li>Cloudflare に D1「scibridge」と Vectorize（768次元・cosine）を作る</li>
+            <li>wrangler secret で Google と Gemini の鍵を入れる</li>
+            <li>マイグレーションを適用してデプロイする</li>
           </ol>
           <p className="muted">手順はリポジトリの docs/SETUP.md にまとめてあります。鍵なしで画面だけ見るときは <code>npm run dev:mock</code> です。</p>
         </section>

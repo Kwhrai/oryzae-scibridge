@@ -17,11 +17,11 @@
 
 | 役割 | 選び | 理由 |
 | --- | --- | --- |
-| アプリ | Next.js（App Router）を Vercel に載せる | ログインの裏側でデータと Drive に触れる。以前の Vite 単体では CSV も Drive リンクも公開されていた |
-| ログイン | Auth.js の Google ログイン | `hd` と確認済みメールが `@oryzae.site` のときだけ通す。画面の `hd` ヒントだけでは判定しない |
-| データ | Neon Postgres + pgvector | 論文とベクトルを一つの無料枠に置ける。ベクトル専用のサービスを増やさない |
-| 意味検索・抽出 | Gemini API（`gemini-2.5-flash` と `gemini-embedding-001`、768次元） | 日本語が強く、件数が少ない社内利用なら費用が小さい。モデル名は環境変数で変えられる |
-| 原本 | Drive API（サービスアカウント） | 共有ドライブ「既報研究（ORYZAE Scibridge）」に、人が置いた PDF もアプリが置いた PDF も同じフォルダで見る |
+| アプリ | Next.js を vinext で Cloudflare Workers に載せる | ログインの裏側でデータと Drive に触れる。Vercel には置かない |
+| ログイン | Google OAuth と署名付きクッキー | 確認済みメールが `@oryzae.site` で、ID トークンの `hd` も同じときだけ通す |
+| 記録 | Cloudflare D1 | 論文、メモ、ブックマーク、確認済み |
+| 意味検索 | Vectorize と Gemini 埋め込み（768次元、cosine） | うろ覚えの日本語と英語。Workers AI にはしていない |
+| 原本 | Drive REST（サービスアカウント） | Workers 上で Web Crypto の JWT。共有ドライブのフォルダは同じ |
 | 書誌 | Crossref と PubMed。OA PDF は Unpaywall | 鍵なしで取れる。Unpaywall だけ連絡用メールが要る |
 
 秘密情報は環境変数だけです。値の取り方は [docs/SETUP.md](docs/SETUP.md) に全部書いてあります。
@@ -34,17 +34,19 @@ npm test
 npm run dev:mock
 ```
 
-`dev:mock` はデータベースも Google も使わず、9件の論文が入った状態で画面を開きます。ログインはスキップします。このモードは本番では無視されます。
+`dev:mock` はログインを飛ばし、Gemini と Drive の代わりにローカルの模擬を使います。D1 と Vectorize は Wrangler のローカル模擬です。このフラグは本番では無視されます。
 
-本番と同じ経路で動かすときは `.env.local` を SETUP の手順どおりに作り、`npm run dev` です。初回起動でテーブル作成と 9件の取り込みをします。意味検索の索引は画面の「意味検索の索引」から作ります。
+本番と同じ経路は `docs/SETUP.md` の `.dev.vars` と `npm run dev` です。意味検索の索引は画面の「意味検索の索引」から作ります。
 
 ```bash
 npm run build
-npm run seed
+npm run deploy
 ```
+
+以前の公開サイト https://oryzae-scibridge.vercel.app は Vercel に残っています。マージ前に Vercel の Git 接続を外してください。手順は SETUP にあります。このリポジトリからは Vercel を操作しません。
 
 ## データの置き場所
 
 - 移行元の CSV は `data/papers.csv`（公開ディレクトリには置かない）
 - 列ずれの直し方は `lib/papers/csv.ts` のコメント
-- 論文本文のテキストとメモは Postgres。PDF のファイル自体は Drive
+- 論文本文のテキストとメモは D1。ベクトルは Vectorize。PDF のファイル自体は Drive

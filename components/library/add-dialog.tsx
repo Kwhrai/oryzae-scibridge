@@ -204,7 +204,7 @@ export function AddDialog({
           <div className="stack-form">
             <label className="dropzone">
               <input type="file" accept="application/pdf,.pdf" hidden onChange={(event) => { const next = event.target.files?.[0]; if (next) void preview(next); }} />
-              <span><strong>{file ? file.name : "PDFを選ぶ"}</strong><br />4MBまで。大きいファイルは Drive に置いて同期します。</span>
+              <span><strong>{file ? file.name : "PDFを選ぶ"}</strong><br />20MBまで。それより大きいファイルは Drive に置いて同期します。</span>
             </label>
             {busy && <p className="state-message"><LoaderCircle className="spin" /> 読んでいます</p>}
             {draft && <DraftForm draft={draft} categories={categories} onChange={update} />}

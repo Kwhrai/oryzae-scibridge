@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createPaperStore, type PaperStore } from "@/lib/db/paper-store";
-import { createPgliteDb } from "@/lib/db/pglite";
+import { createNodeSqlite } from "@/lib/db/sql";
+import { createMemoryVectorIndex } from "@/lib/vectors";
 import { papersFromCsv } from "@/lib/papers/csv";
 import { hashEmbedding } from "@/lib/papers/rank";
 import { createMockDrive } from "@/lib/drive/mock";
@@ -11,7 +12,7 @@ import { addCitation, addPdf, searchLibrary, syncDrive, type AppContext } from "
 let store: PaperStore;
 
 beforeAll(async () => {
-  store = createPaperStore(await createPgliteDb());
+  store = createPaperStore(await createNodeSqlite(), createMemoryVectorIndex());
   const csv = readFileSync(new URL("../data/papers.csv", import.meta.url), "utf8");
   const inserted = await store.seedMigrated(papersFromCsv(csv));
   expect(inserted).toBe(9);

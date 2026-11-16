@@ -1,9 +1,7 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { AppError } from "@/lib/app-error";
 import { driveConfigured, driveRootFolderId, llmConfigured, mockModeEnabled } from "@/lib/config";
 import { createPaperStore } from "@/lib/db/paper-store";
-import { createNeonDb } from "@/lib/db/neon";
+import { createD1Sql, type D1Like } from "@/lib/db/sql";
 import { createDisabledDrive, createMockDrive } from "@/lib/drive/mock";
 import { createGoogleDriveClient } from "@/lib/drive/google-drive";
 import { createDisabledLlm, createGeminiClient } from "@/lib/llm/gemini";
@@ -12,27 +10,28 @@ import { reindex, type AppContext } from "@/lib/library";
 import { fetchOpenAccessPdf, lookupCitation } from "@/lib/metadata/lookup";
 import { papersFromCsv } from "@/lib/papers/csv";
 import { extractPdfText } from "@/lib/pdf/extract";
+import { runtimeEnv } from "@/lib/runtime-env";
+import bundledCsv from "../data/papers.csv?raw";
+import { createMemoryVectorIndex, createVectorizeIndex } from "@/lib/vectors";
 
 const globalForApp = globalThis as { scibridge?: Promise<AppContext> };
 
-function loadSeedCsv(): string {
-  return readFileSync(join(process.cwd(), "data", "papers.csv"), "utf8");
-}
-
 async function buildContext(): Promise<AppContext> {
-  const mock = mockModeEnabled();
-  if (!mock && !process.env.DATABASE_URL) {
-    throw new AppError("データベースが未設定です。DATABASE_URL を設定してください。手順は docs/SETUP.md です。", 503, "setup");
+  const env = await runtimeEnv();
+  const mock = mockModeEnabled(env);
+  if (!env.DB) {
+    throw new AppError("D1 が未接続です。wrangler.jsonc の DB バインディングとマイグレーションを確認してください。手順は docs/SETUP.md です。", 503, "setup");
   }
-  const db = mock ? await (await import("@/lib/db/pglite")).createPgliteDb() : createNeonDb(process.env.DATABASE_URL!);
-  const store = createPaperStore(db);
+  // Local wrangler does not simulate Vectorize. Mock mode keeps vectors in memory.
+  const vectors = !mock && env.VECTORIZE ? createVectorizeIndex(env.VECTORIZE) : createMemoryVectorIndex();
+  const store = createPaperStore(createD1Sql(env.DB as D1Like), vectors);
   await store.ensureSchema();
-  await store.seedMigrated(papersFromCsv(loadSeedCsv()));
-  const llm = mock ? createMockLlm() : llmConfigured() ? createGeminiClient(process.env.GEMINI_API_KEY!) : createDisabledLlm();
+  await store.seedMigrated(papersFromCsv(bundledCsv));
+  const llm = mock ? createMockLlm() : llmConfigured(env) ? createGeminiClient(env) : createDisabledLlm();
   const drive = mock
     ? createMockDrive()
-    : driveConfigured()
-      ? createGoogleDriveClient()
+    : driveConfigured(env)
+      ? createGoogleDriveClient(env)
       : createDisabledDrive("Google Drive が未設定です。サービスアカウントを共有ドライブのメンバーにしてください。");
   const ctx: AppContext = {
     store,
@@ -41,7 +40,7 @@ async function buildContext(): Promise<AppContext> {
     extractText: extractPdfText,
     lookup: lookupCitation,
     fetchOpenAccessPdf,
-    driveRootId: driveRootFolderId(),
+    driveRootId: driveRootFolderId(env),
     mock,
     llmConfigured: llm.configured,
     driveConfigured: drive.configured,

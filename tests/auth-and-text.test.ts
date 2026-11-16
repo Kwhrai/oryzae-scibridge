@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { hostedDomainFromIdToken, isAllowedWorkspaceUser } from "@/lib/auth/domain";
+import { googleIdClaimsAllowed } from "@/lib/auth/google";
+import { derToPem, signRs256Jwt, verifyRs256Jwt } from "@/lib/auth/jwt";
+import { readSession, signSession } from "@/lib/auth/session-cookie";
 import { authBypassEnabled, mockModeEnabled, normalizePrivateKey } from "@/lib/config";
 import { extractDoi, extractPmid } from "@/lib/papers/doi";
 import { queryTokens, snippetAround } from "@/lib/papers/text";
@@ -31,6 +34,43 @@ describe("workspace access", () => {
   it("reads hd from an id token payload without treating the hint as enough", () => {
     const payload = Buffer.from(JSON.stringify({ hd: "oryzae.site", email: "a@oryzae.site" })).toString("base64url");
     expect(hostedDomainFromIdToken(`x.${payload}.y`)).toBe("oryzae.site");
+  });
+
+  it("accepts a signed session cookie only for the company domain", async () => {
+    const token = await signSession({ email: "ai@oryzae.site", name: "Ai", hd: "oryzae.site" }, "secret", 1_000);
+    const session = await readSession(token, "secret", { now: 1_000, domain: "oryzae.site" });
+    expect(session?.email).toBe("ai@oryzae.site");
+    expect(await readSession(token, "other-secret", { now: 1_000, domain: "oryzae.site" })).toBeNull();
+    expect(await readSession(token, "secret", { now: 1_000, domain: "example.com" })).toBeNull();
+  });
+
+  it("checks Google ID token claims and can sign a service-account JWT", async () => {
+    expect(googleIdClaimsAllowed({
+      iss: "https://accounts.google.com",
+      aud: "client",
+      exp: 2_000,
+      email: "ai@oryzae.site",
+      email_verified: true,
+      hd: "oryzae.site",
+    }, "client", "oryzae.site", 1_000)).toBe(true);
+    expect(googleIdClaimsAllowed({
+      iss: "https://accounts.google.com",
+      aud: "client",
+      exp: 2_000,
+      email: "ai@gmail.com",
+      email_verified: true,
+      hd: "gmail.com",
+    }, "client", "oryzae.site", 1_000)).toBe(false);
+
+    const pair = await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    );
+    const pem = derToPem(await crypto.subtle.exportKey("pkcs8", pair.privateKey), "PRIVATE KEY");
+    const jwt = await signRs256Jwt(pem, { iss: "drive@oryzae.site" });
+    const verified = await verifyRs256Jwt(jwt, pair.publicKey);
+    expect(verified?.iss).toBe("drive@oryzae.site");
   });
 
   it("never enables the dev bypass in production", () => {
