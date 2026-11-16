@@ -32,16 +32,20 @@ export function mockModeEnabled(env: Env = process.env): boolean {
   return env.SCI_BRIDGE_MOCK === "1";
 }
 
-export function normalizePrivateKey(raw: string): string {
-  let key = raw.trim();
-  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
-    key = key.slice(1, -1);
-  }
-  return key.replace(/\\n/g, "\n");
+export function driveConfigured(env: Env = process.env): boolean {
+  return Boolean(env.APPS_SCRIPT_URL?.trim() && env.APPS_SCRIPT_SECRET?.trim());
 }
 
-export function driveConfigured(env: Env = process.env): boolean {
-  return Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL?.trim() && env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.trim());
+export function accessConfigured(env: Env = process.env): boolean {
+  return Boolean(env.CF_ACCESS_TEAM_DOMAIN?.trim() && env.CF_ACCESS_AUD?.trim());
+}
+
+export function workersAiModel(env: Env = process.env): string {
+  return (env.WORKERS_AI_MODEL || "@cf/meta/llama-3.1-8b-instruct").trim();
+}
+
+export function workersAiEmbeddingModel(env: Env = process.env): string {
+  return (env.WORKERS_AI_EMBEDDING_MODEL || "@cf/baai/bge-base-en-v1.5").trim();
 }
 
 export function llmConfigured(env: Env = process.env): boolean {

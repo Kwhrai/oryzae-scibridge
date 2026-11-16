@@ -61,6 +61,7 @@ export type PaperStore = {
   get(id: string, userEmail: string): Promise<PaperRecord | null>;
   findByDoi(doi: string): Promise<{ id: string; title: string } | null>;
   listForDriveMatch(): Promise<{ id: string; title: string; doi: string; driveFileId: string | null }[]>;
+  listLegacyIds(): Promise<string[]>;
   insert(input: PaperDraft): Promise<PaperRecord>;
   update(id: string, patch: PaperPatch): Promise<PaperRecord | null>;
   setBookmark(id: string, userEmail: string, bookmarked: boolean): Promise<void>;
@@ -251,7 +252,13 @@ export function createPaperStore(sql: Sql, vectors: VectorIndex): PaperStore {
       );
       return rows[0] ?? null;
     },
+    async listLegacyIds() {
+      await ensureSchema();
+      const rows = await sql.all<{ legacy_id: string }>("SELECT legacy_id FROM papers WHERE legacy_id IS NOT NULL");
+      return rows.map((row) => row.legacy_id);
+    },
     async listForDriveMatch() {
+      await ensureSchema();
       const rows = await sql.all<{ id: string; title: string; doi: string; drive_file_id: string | null }>(
         "SELECT id, title, doi, drive_file_id FROM papers",
       );

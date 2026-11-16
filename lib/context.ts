@@ -1,60 +1,88 @@
 import { AppError } from "@/lib/app-error";
-import { driveConfigured, driveRootFolderId, llmConfigured, mockModeEnabled } from "@/lib/config";
-import { createPaperStore } from "@/lib/db/paper-store";
-import { createD1Sql, type D1Like } from "@/lib/db/sql";
+import { authBypassEnabled, driveRootFolderId, mockModeEnabled } from "@/lib/config";
+import { createD1Sql, createNodeSqlite, type Sql } from "@/lib/db/sql";
+import { createPaperStore, type PaperStore } from "@/lib/db/paper-store";
+import { createAppsScriptDrive } from "@/lib/drive/apps-script";
 import { createDisabledDrive, createMockDrive } from "@/lib/drive/mock";
-import { createGoogleDriveClient } from "@/lib/drive/google-drive";
-import { createDisabledLlm, createGeminiClient } from "@/lib/llm/gemini";
+import type { DriveClient } from "@/lib/drive/types";
+import { verifyAccessJwt, type AccessIdentity } from "@/lib/auth/access";
+import type { AppContext } from "@/lib/library";
+import { createGeminiClient } from "@/lib/llm/gemini";
 import { createMockLlm } from "@/lib/llm/mock";
-import { reindex, type AppContext } from "@/lib/library";
+import { createWorkersAiClient } from "@/lib/llm/workers-ai";
+import type { LlmClient } from "@/lib/llm/types";
 import { fetchOpenAccessPdf, lookupCitation } from "@/lib/metadata/lookup";
-import { papersFromCsv } from "@/lib/papers/csv";
-import { extractPdfText } from "@/lib/pdf/extract";
-import { runtimeEnv } from "@/lib/runtime-env";
-import bundledCsv from "../data/papers.csv?raw";
-import { createMemoryVectorIndex, createVectorizeIndex } from "@/lib/vectors";
+import { runtimeEnv, type RuntimeEnv } from "@/lib/runtime-env";
+import { createMemoryVectorIndex, createVectorizeIndex, type VectorIndex } from "@/lib/vectors";
 
-const globalForApp = globalThis as { scibridge?: Promise<AppContext> };
+export type CurrentUser = AccessIdentity;
 
-async function buildContext(): Promise<AppContext> {
+let cachedSql: Sql | null = null;
+let cachedStore: PaperStore | null = null;
+let cachedVectors: VectorIndex | null = null;
+
+function unconfiguredLlm(): LlmClient {
+  const fail = async () => {
+    throw new AppError("GEMINI_API_KEY も Workers AI も未設定です。意味検索とAI抽出を使うにはどちらかを設定してください。", 503, "setup");
+  };
+  return { configured: false, readPdf: fail, extractMetadata: fail, structurePaper: fail, embed: async () => [] };
+}
+
+function llmFor(env: RuntimeEnv, mock: boolean): LlmClient {
+  if (mock) return createMockLlm();
+  const provider = (env.LLM_PROVIDER || "auto").trim();
+  const gemini = Boolean(env.GEMINI_API_KEY?.trim());
+  if ((provider === "auto" || provider === "gemini") && gemini) return createGeminiClient(env);
+  if ((provider === "auto" || provider === "workers-ai") && env.AI) return createWorkersAiClient(env.AI, env);
+  return unconfiguredLlm();
+}
+
+function driveFor(env: RuntimeEnv, mock: boolean): DriveClient {
+  if (mock) return createMockDrive();
+  if (env.APPS_SCRIPT_URL?.trim() && env.APPS_SCRIPT_SECRET?.trim()) return createAppsScriptDrive(env);
+  return createDisabledDrive("Drive は Apps Script 経由です。APPS_SCRIPT_URL と APPS_SCRIPT_SECRET を設定してください。");
+}
+
+async function database(env: RuntimeEnv, mock: boolean): Promise<{ sql: Sql; vectors: VectorIndex }> {
+  if (!cachedSql) {
+    if (env.DB) cachedSql = createD1Sql(env.DB);
+    else if (mock) cachedSql = await createNodeSqlite();
+    else throw new Error("D1 バインディング DB がありません");
+  }
+  if (!cachedVectors) {
+    cachedVectors = !mock && env.VECTORIZE ? createVectorizeIndex(env.VECTORIZE) : createMemoryVectorIndex();
+  }
+  return { sql: cachedSql, vectors: cachedVectors };
+}
+
+export async function getContext(): Promise<AppContext> {
   const env = await runtimeEnv();
   const mock = mockModeEnabled(env);
-  if (!env.DB) {
-    throw new AppError("D1 が未接続です。wrangler.jsonc の DB バインディングとマイグレーションを確認してください。手順は docs/SETUP.md です。", 503, "setup");
-  }
-  // Local wrangler does not simulate Vectorize. Mock mode keeps vectors in memory.
-  const vectors = !mock && env.VECTORIZE ? createVectorizeIndex(env.VECTORIZE) : createMemoryVectorIndex();
-  const store = createPaperStore(createD1Sql(env.DB as D1Like), vectors);
-  await store.ensureSchema();
-  await store.seedMigrated(papersFromCsv(bundledCsv));
-  const llm = mock ? createMockLlm() : llmConfigured(env) ? createGeminiClient(env) : createDisabledLlm();
-  const drive = mock
-    ? createMockDrive()
-    : driveConfigured(env)
-      ? createGoogleDriveClient(env)
-      : createDisabledDrive("Google Drive が未設定です。サービスアカウントを共有ドライブのメンバーにしてください。");
-  const ctx: AppContext = {
-    store,
-    llm,
+  const { sql, vectors } = await database(env, mock);
+  if (!cachedStore) cachedStore = createPaperStore(sql, vectors);
+  const llm = llmFor(env, mock);
+  const drive = driveFor(env, mock);
+  return {
+    store: cachedStore,
     drive,
-    extractText: extractPdfText,
-    lookup: lookupCitation,
-    fetchOpenAccessPdf,
+    llm,
+    lookup: (input) => lookupCitation(input),
+    fetchOpenAccessPdf: (doi) => fetchOpenAccessPdf(doi),
     driveRootId: driveRootFolderId(env),
     mock,
     llmConfigured: llm.configured,
     driveConfigured: drive.configured,
   };
-  if (mock) await reindex(ctx, 20);
-  return ctx;
 }
 
-export function getContext(): Promise<AppContext> {
-  if (!globalForApp.scibridge) {
-    globalForApp.scibridge = buildContext().catch((error) => {
-      globalForApp.scibridge = undefined;
-      throw error;
-    });
-  }
-  return globalForApp.scibridge;
+export async function currentUser(request: Request): Promise<CurrentUser | null> {
+  const env = await runtimeEnv();
+  if (authBypassEnabled(env)) return { email: "dev@oryzae.site", name: "開発ユーザー" };
+  return verifyAccessJwt(request.headers.get("cf-access-jwt-assertion"), env);
+}
+
+export function resetRuntimeForTests(): void {
+  cachedSql = null;
+  cachedStore = null;
+  cachedVectors = null;
 }

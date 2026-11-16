@@ -83,22 +83,27 @@ export function AddDialog({
     setDraft((current) => (current ? { ...current, [key]: value } : current));
   }
 
-  async function preview(next: File) {
-    setFile(next);
-    setBusy(true);
-    setError(null);
-    setDraft(null);
-    try {
-      const form = new FormData();
-      form.set("file", next);
-      const result = await api<{ draft: Draft & { year?: number | null }; warning?: string; ai: boolean }>("/api/papers/preview-pdf", { method: "POST", body: form });
-      setDraft(toDraft(result.draft));
-      setNote(result.warning ?? (result.ai ? "本文から項目を埋めました。違うところは直して保存してください。" : null));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "読み取れませんでした");
-    } finally {
-      setBusy(false);
+  function preview(next: File) {
+    if (next.size > 20 * 1024 * 1024) {
+      setError("PDFは20MBまでです。それより大きいファイルは共有ドライブに置いて同期してください。");
+      setFile(null);
+      setDraft(null);
+      return;
     }
+    setFile(next);
+    setError(null);
+    setDraft(toDraft({ title: next.name.replace(/\.pdf$/i, "") }));
+    setNote("保存すると本文を読み、空欄を補います。先に直したい欄だけ入力してください。");
+  }
+
+  async function fileToBase64(next: File): Promise<string> {
+    const bytes = new Uint8Array(await next.arrayBuffer());
+    let binary = "";
+    const step = 0x8000;
+    for (let index = 0; index < bytes.length; index += step) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + step));
+    }
+    return btoa(binary);
   }
 
   async function savePdfFile() {
@@ -109,10 +114,16 @@ export function AddDialog({
     setBusy(true);
     setError(null);
     try {
-      const form = new FormData();
-      form.set("file", file);
-      form.set("metadata", JSON.stringify(payload(draft)));
-      const result = await api<{ paper: PaperDetail; warning?: string }>("/api/papers/from-pdf", { method: "POST", body: form });
+      const encoded = await fileToBase64(file);
+      const result = await api<{ paper: PaperDetail; warning?: string }>("/api/papers/from-pdf", {
+        method: "POST",
+        body: encoded,
+        headers: {
+          "content-type": "text/plain",
+          "x-filename": encodeURIComponent(file.name),
+          "x-metadata": encodeURIComponent(JSON.stringify(payload(draft))),
+        },
+      });
       onSaved(result.paper, result.warning);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "保存できませんでした");

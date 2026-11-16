@@ -12,7 +12,7 @@ export async function POST() {
     const user = await requireUser();
     if (!user) return json({ error: "ログインが必要です" }, 401);
     const ctx = await getContext();
-    const result = await syncDrive(ctx, 1);
+    const result = await syncDrive(ctx);
     return json(result);
   } catch (error) {
     return errorResponse(error);

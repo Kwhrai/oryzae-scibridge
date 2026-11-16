@@ -59,5 +59,7 @@ export function readExtracted(body: unknown) {
     methods: text("methods"),
     results: text("results"),
     discussion: text("discussion"),
+    summary: text("summary"),
+    bodyText: text("bodyText"),
   };
 }

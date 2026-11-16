@@ -69,7 +69,6 @@ describe("adding and drive sync", () => {
       store,
       llm: createMockLlm(),
       drive: createMockDrive(),
-      extractText: async () => "Koji amazake study",
       lookup: async () => ({
         title: "New Koji Review",
         authors: "Seidler Y",
@@ -92,8 +91,8 @@ describe("adding and drive sync", () => {
   it("saves an uploaded PDF into Drive and the library", async () => {
     const ctx = context({
       drive: createMockDrive(),
-      extractText: async () => "Thermotolerant koji enzyme. doi 10.1111/uploaded.1",
     });
+    const blank = { summary: "", bodyText: "" };
     const saved = await addPdf(ctx, "member@oryzae.site", new Uint8Array([0x25, 0x50, 0x44, 0x46]), "enzyme.pdf", {
       title: "アップロードした酵素論文",
       authors: "Oryzae Lab",
@@ -107,11 +106,12 @@ describe("adding and drive sync", () => {
       methods: "",
       results: "",
       discussion: "",
+      ...blank,
     });
     expect(saved.driveSaved).toBe(true);
     expect(saved.paper.doi).toBe("10.1111/uploaded.1");
     expect(saved.paper.driveUrl).toContain("drive.google.com");
-    expect(saved.embedded).toBe(true);
+    expect(saved.embedded).toBe(false);
     const again = addPdf(ctx, "member@oryzae.site", new Uint8Array([0x25, 0x50, 0x44, 0x46]), "enzyme.pdf", {
       title: "二重",
       authors: "",
@@ -125,6 +125,7 @@ describe("adding and drive sync", () => {
       methods: "",
       results: "",
       discussion: "",
+      ...blank,
     });
     await expect(again).rejects.toThrow(/同じ DOI/);
   });
@@ -148,10 +149,12 @@ describe("adding and drive sync", () => {
       { id: "drive-enzyme", name: "Thermostable α-Amylases and Laccases from Koji Mold.pdf", category: "糖化酵素", bytes: new TextEncoder().encode("no doi in this file") },
       { id: "drive-new", name: "新しい代謝産物.pdf", category: "麹菌由来の代謝産物", bytes: new TextEncoder().encode("A brand new metabolite paper with no doi") },
     ]);
-    const synced = await syncDrive(context({
-      drive,
-      extractText: async (bytes) => new TextDecoder().decode(bytes),
-    }), 5);
+    const synced = { attached: 0, indexed: 0 };
+    for (let step = 0; step < 3; step += 1) {
+      const once = await syncDrive(context({ drive }));
+      synced.attached += once.attached;
+      synced.indexed += once.indexed;
+    }
     expect(synced.attached).toBe(1);
     expect(synced.indexed).toBe(1);
     const known = await store.get("csv-1", "member@oryzae.site");

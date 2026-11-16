@@ -1,18 +1,13 @@
-export type RuntimeEnv = Record<string, string | undefined> & {
-  DB?: D1Binding;
-  VECTORIZE?: VectorizeBinding;
+import type { D1Like } from "@/lib/db/sql";
+
+export type WorkersAiBinding = {
+  run(model: string, input: Record<string, unknown>): Promise<unknown>;
 };
 
-type D1Binding = {
-  prepare(query: string): {
-    bind(...values: unknown[]): {
-      all<T>(): Promise<{ results?: T[] }>;
-      run(): Promise<unknown>;
-    };
-    all<T>(): Promise<{ results?: T[] }>;
-    run(): Promise<unknown>;
-  };
-  batch(statements: unknown[]): Promise<unknown>;
+export type RuntimeEnv = Record<string, string | undefined> & {
+  DB?: D1Like;
+  VECTORIZE?: VectorizeBinding;
+  AI?: WorkersAiBinding;
 };
 
 type VectorizeBinding = {
@@ -31,8 +26,9 @@ export async function runtimeEnv(): Promise<RuntimeEnv> {
     for (const [key, value] of Object.entries(env)) {
       if (typeof value === "string") merged[key] = value;
     }
-    if (env.DB && typeof env.DB === "object") merged.DB = env.DB as D1Binding;
+    if (env.DB && typeof env.DB === "object") merged.DB = env.DB as D1Like;
     if (env.VECTORIZE && typeof env.VECTORIZE === "object") merged.VECTORIZE = env.VECTORIZE as VectorizeBinding;
+    if (env.AI && typeof env.AI === "object" && "run" in (env.AI as object)) merged.AI = env.AI as WorkersAiBinding;
   } catch {
     // Vitest and plain Node have no Workers binding.
   }

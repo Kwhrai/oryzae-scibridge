@@ -45,12 +45,21 @@ export function LibraryApp({
   const searchRef = useRef<HTMLInputElement>(null);
   const requestId = useRef(0);
 
+  const seeded = useRef(false);
   const load = useCallback(async (nextQuery: string, nextCategory: string | null) => {
     const id = ++requestId.current;
     const params = new URLSearchParams();
     if (nextQuery.trim()) params.set("q", nextQuery.trim());
     if (nextCategory) params.set("category", nextCategory);
     try {
+      if (!seeded.current) {
+        for (let step = 0; step < 12; step += 1) {
+          const seed = await api<{ inserted: number; remaining: number }>("/api/seed", { method: "POST" });
+          if (seed.remaining <= 0) break;
+        }
+        seeded.current = true;
+      }
+      if (id !== requestId.current) return;
       const data = await api<SearchResponse>(`/api/papers?${params.toString()}`);
       if (id !== requestId.current) return;
       setSetup(false);
@@ -149,9 +158,9 @@ export function LibraryApp({
           <h1>準備がまだです</h1>
           <p className="muted">{error}</p>
           <ol className="muted">
-            <li>Cloudflare に D1「scibridge」と Vectorize（768次元・cosine）を作る</li>
-            <li>wrangler secret で Google と Gemini の鍵を入れる</li>
-            <li>マイグレーションを適用してデプロイする</li>
+            <li>Cloudflare Access で @oryzae.site のワンタイムPINを付ける</li>
+            <li>Apps Script をデプロイし、wrangler secret に URL と共有秘密を入れる</li>
+            <li>意味検索は Gemini か Workers AI。索引は画面のボタンで1件ずつ作る</li>
           </ol>
           <p className="muted">手順はリポジトリの docs/SETUP.md にまとめてあります。鍵なしで画面だけ見るときは <code>npm run dev:mock</code> です。</p>
         </section>

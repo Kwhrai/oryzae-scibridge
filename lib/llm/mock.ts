@@ -2,7 +2,30 @@ import { EMBEDDING_DIM } from "@/lib/config";
 import { hashEmbedding } from "@/lib/papers/rank";
 import { extractDoi } from "@/lib/papers/doi";
 import { yearFromText } from "@/lib/papers/doi";
+import type { PdfSource } from "@/lib/llm/gemini-file";
 import type { LlmClient } from "@/lib/llm/types";
+
+async function textOfPdf(input: PdfSource): Promise<string> {
+  if (input.bytes) return new TextDecoder().decode(input.bytes);
+  if (!input.body) return input.filename;
+  const reader = input.body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    parts.push(value);
+    total += value.byteLength;
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
 
 function firstLine(text: string): string {
   return text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 180) ?? "";
@@ -11,6 +34,15 @@ function firstLine(text: string): string {
 export function createMockLlm(): LlmClient {
   return {
     configured: true,
+    async readPdf(input) {
+      const text = await textOfPdf(input);
+      const extracted = await this.extractMetadata(text, { filename: input.filename, categories: input.categories });
+      return {
+        ...extracted,
+        summary: (extracted.summary || text).slice(0, 800),
+        bodyText: (extracted.bodyText || text).slice(0, 4000),
+      };
+    },
     async extractMetadata(text, hints) {
       const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
       return {
@@ -26,6 +58,8 @@ export function createMockLlm(): LlmClient {
         methods: "",
         results: lines[1] ? `（モック抽出）結果: ${lines[1].slice(0, 180)}` : "",
         discussion: "",
+        summary: lines.slice(0, 2).join(" ").slice(0, 800),
+        bodyText: text.slice(0, 4000),
       };
     },
     async structurePaper(input) {

@@ -7,8 +7,9 @@ import { paperFilename } from "@/lib/drive/filename";
 import type { LlmClient } from "@/lib/llm/types";
 import type { CitationDraft } from "@/lib/metadata/crossref";
 import { extractDoi, normalizeDoi, yearFromText } from "@/lib/papers/doi";
-import { embeddingDocuments } from "@/lib/papers/chunk";
+import type { IngestedPdf } from "@/lib/drive/types";
 import type { ExtractedPaper } from "@/lib/papers/model-json";
+import { bundledPapers } from "@/lib/papers/bundled";
 import { toDetail, toSummary, type PaperDetail, type PaperSummary } from "@/lib/papers/present";
 
 const PDF_LIMIT = 20 * 1024 * 1024;
@@ -17,9 +18,8 @@ export type AppContext = {
   store: PaperStore;
   llm: LlmClient;
   drive: DriveClient;
-  extractText: (bytes: Uint8Array) => Promise<string>;
   lookup: (input: string) => Promise<CitationDraft>;
-  fetchOpenAccessPdf: (doi: string) => Promise<Uint8Array | null>;
+  fetchOpenAccessPdf: (doi: string) => Promise<string | null>;
   driveRootId: string;
   mock: boolean;
   llmConfigured: boolean;
@@ -40,12 +40,17 @@ function referenceOf(input: { authors?: string; year?: number | null; title: str
     .join(". ");
 }
 
-async function embedRecord(ctx: AppContext, paper: PaperRecord): Promise<boolean> {
+function embedSource(paper: { title: string; abstract?: string; pdfText?: string }): string {
+  return [paper.title, paper.abstract, paper.pdfText].filter(Boolean).join("\n").slice(0, 2000);
+}
+
+async function embedRecord(ctx: AppContext, paper: { id: string; title: string; abstract?: string; pdfText?: string }): Promise<boolean> {
   if (!ctx.llm.configured) return false;
-  const documents = embeddingDocuments({ title: paper.title, searchText: paper.searchText, pdfText: paper.pdfText });
-  if (documents.length === 0) return false;
-  const vectors = await ctx.llm.embed(documents);
-  await ctx.store.replaceChunks(paper.id, documents.map((content, index) => ({ content, embedding: vectors[index] })));
+  const text = embedSource(paper);
+  if (!text) return false;
+  const [vector] = await ctx.llm.embed([text]);
+  if (!vector) return false;
+  await ctx.store.replaceChunks(paper.id, [{ content: text, embedding: vector }]);
   return true;
 }
 
@@ -60,7 +65,7 @@ export async function searchLibrary(ctx: AppContext, userEmail: string, query: s
   let warning: string | undefined;
   if (query.trim() && ctx.llm.configured) {
     try {
-      const [vector] = await ctx.llm.embed([query.trim()]);
+      const [vector] = await ctx.llm.embed([query.trim().slice(0, 400)]);
       embedding = vector ?? null;
     } catch (error) {
       console.error(error);
@@ -88,27 +93,32 @@ export async function searchLibrary(ctx: AppContext, userEmail: string, query: s
   };
 }
 
-export async function reindex(ctx: AppContext, limit: number) {
-  const bounded = Math.min(20, Math.max(1, limit));
+export async function seedNext(ctx: AppContext): Promise<{ inserted: number; remaining: number }> {
+  const papers = bundledPapers();
+  const have = new Set(await ctx.store.listLegacyIds());
+  const next = papers.find((paper) => paper.legacyId && !have.has(paper.legacyId));
+  if (!next) return { inserted: 0, remaining: 0 };
+  const inserted = await ctx.store.seedMigrated([next]);
+  return { inserted, remaining: papers.length - have.size - inserted };
+}
+
+export async function reindex(ctx: AppContext, _limit = 1) {
   if (!ctx.llm.configured) {
     const stats = await ctx.store.stats();
     return {
       indexed: 0,
       remaining: Math.max(0, stats.total - stats.embedded),
-      warning: "GEMINI_API_KEY が未設定のため、意味検索の索引を作れません",
+      warning: "埋め込みの設定が無いため、意味検索の索引を作れません",
     };
   }
-  const missing = await ctx.store.listMissingEmbeddings(bounded);
-  let indexed = 0;
-  for (const paper of missing) {
-    const documents = embeddingDocuments(paper);
-    if (documents.length === 0) continue;
-    const vectors = await ctx.llm.embed(documents);
-    await ctx.store.replaceChunks(paper.id, documents.map((content, index) => ({ content, embedding: vectors[index] })));
-    indexed += 1;
+  const [paper] = await ctx.store.listMissingEmbeddings(1);
+  if (!paper) {
+    const stats = await ctx.store.stats();
+    return { indexed: 0, remaining: Math.max(0, stats.total - stats.embedded) };
   }
+  await embedRecord(ctx, paper);
   const stats = await ctx.store.stats();
-  return { indexed, remaining: Math.max(0, stats.total - stats.embedded) };
+  return { indexed: 1, remaining: Math.max(0, stats.total - stats.embedded) };
 }
 
 function draftFromExtraction(extracted: ExtractedPaper, fallbackText: string): ExtractedPaper {
@@ -120,34 +130,35 @@ function draftFromExtraction(extracted: ExtractedPaper, fallbackText: string): E
   };
 }
 
-export async function previewPdf(ctx: AppContext, bytes: Uint8Array, filename: string) {
-  if (bytes.byteLength > PDF_LIMIT) {
+export async function previewPdf(ctx: AppContext, input: { filename: string; size: number; body: ReadableStream<Uint8Array> | null; bytes?: Uint8Array }) {
+  if (input.size > PDF_LIMIT) {
     throw new AppError("PDFは20MBまでです。それより大きいファイルは共有ドライブに置いてから「Driveを同期」してください。", 413);
   }
-  const text = await ctx.extractText(bytes);
-  const categories = (await ctx.store.categories()).map((item) => item.name);
   if (!ctx.llm.configured) {
     return {
       ai: false,
-      warning: "GEMINI_API_KEY が無いため、本文からの自動抽出は行っていません。タイトルなどを手で補ってください。",
+      warning: "AIの設定が無いため、本文からの自動抽出は行っていません。タイトルなどを手で補ってください。",
       draft: draftFromExtraction({
-        title: filename.replace(/\.pdf$/i, ""),
+        title: input.filename.replace(/\.pdf$/i, ""),
         authors: "",
-        year: yearFromText(text),
+        year: null,
         journal: "",
-        doi: extractDoi(text) ?? "",
-        abstract: text.slice(0, 600),
+        doi: "",
+        abstract: "",
         category: "",
         background: "",
         objective: "",
         methods: "",
         results: "",
         discussion: "",
-      }, text),
+        summary: "",
+        bodyText: "",
+      }, ""),
     };
   }
-  const extracted = draftFromExtraction(await ctx.llm.extractMetadata(text, { filename, categories }), text);
-  return { ai: true, draft: extracted };
+  const categories = (await ctx.store.categories()).map((item) => item.name);
+  const extracted = await ctx.llm.readPdf({ ...input, categories });
+  return { ai: true, draft: draftFromExtraction(extracted, extracted.bodyText || extracted.summary) };
 }
 
 async function storePdf(ctx: AppContext, bytes: Uint8Array, title: string, year: number | null, category: string): Promise<{ id: string; webViewLink: string } | { warning: string }> {
@@ -173,22 +184,19 @@ async function storePdf(ctx: AppContext, bytes: Uint8Array, title: string, year:
 
 async function finishSave(ctx: AppContext, userEmail: string, id: string, driveSaved: boolean, warning?: string): Promise<SaveResult> {
   const paper = await reload(ctx, id, userEmail);
-  let embedded = false;
-  try {
-    embedded = await embedRecord(ctx, paper);
-  } catch (error) {
-    console.error(error);
-    warning = [warning, "意味検索の索引はまだです。あとから「索引を作成」を押してください。"].filter(Boolean).join(" ");
-  }
-  const fresh = await reload(ctx, id, userEmail);
-  return { paper: toDetail(fresh), driveSaved, embedded, warning };
+  return {
+    paper: toDetail(paper),
+    driveSaved,
+    embedded: false,
+    warning: [warning, "意味検索の索引は、一覧の「意味検索の索引」で1件ずつ作ります。"].filter(Boolean).join(" "),
+  };
 }
 
 export async function addPdf(ctx: AppContext, userEmail: string, bytes: Uint8Array, _filename: string, meta: ExtractedPaper): Promise<SaveResult> {
   if (bytes.byteLength > PDF_LIMIT) {
     throw new AppError("PDFは20MBまでです。それより大きいファイルは共有ドライブに置いてから同期してください。", 413);
   }
-  const text = await safeText(ctx, bytes);
+  const text = meta.bodyText || "";
   const title = meta.title.trim();
   if (!title) throw new AppError("タイトルは必須です");
   const doi = meta.doi ? normalizeDoi(meta.doi) : extractDoi(text) || "";
@@ -213,12 +221,71 @@ export async function addPdf(ctx: AppContext, userEmail: string, bytes: Uint8Arr
   return finishSave(ctx, userEmail, paper.id, driveSaved, "warning" in stored ? stored.warning : undefined);
 }
 
-async function safeText(ctx: AppContext, bytes: Uint8Array): Promise<string> {
-  try {
-    return await ctx.extractText(bytes);
-  } catch {
-    return "";
+function prefer(user: string | undefined, fallback: string | undefined): string {
+  const value = user?.trim();
+  return value ? value : (fallback ?? "");
+}
+
+export async function addUploadedPdf(ctx: AppContext, userEmail: string, input: {
+  filename: string;
+  size: number;
+  body: BodyInit;
+  meta: ExtractedPaper;
+}): Promise<SaveResult> {
+  const encodedLimit = Math.ceil(PDF_LIMIT / 3) * 4 + 64 * 1024;
+  if (input.size > encodedLimit) {
+    throw new AppError("PDFは20MBまでです。それより大きいファイルは共有ドライブに置いてから同期してください。", 413);
   }
+  let warning: string | undefined;
+  let ingested: IngestedPdf | null = null;
+  if (!ctx.drive.configured) {
+    warning = "Drive が未設定のため、PDFファイルはクラウドに置いていません。";
+  } else {
+    try {
+      ingested = await ctx.drive.savePdf({
+        filename: paperFilename(input.meta.title || input.filename, input.meta.year),
+        category: input.meta.category.trim() || "未分類",
+        body: input.body,
+        size: input.size,
+      });
+    } catch (error) {
+      warning = `${error instanceof Error ? error.message : "Drive への保存に失敗しました"} 論文データはライブラリに残します。`;
+    }
+  }
+  let extracted = ingested?.extraction ?? null;
+  if (!extracted?.title && ingested?.plainText && ctx.llm.configured) {
+    try {
+      extracted = await ctx.llm.extractMetadata(ingested.plainText.slice(0, 4000), { filename: input.filename });
+    } catch (error) {
+      warning = [warning, error instanceof Error ? error.message : ""].filter(Boolean).join(" ");
+    }
+  }
+  const title = prefer(input.meta.title, extracted?.title) || input.filename.replace(/\.pdf$/i, "");
+  const doi = normalizeDoi(prefer(input.meta.doi, extracted?.doi));
+  if (doi) {
+    const existing = await ctx.store.findByDoi(doi);
+    if (existing) throw new AppError(`同じ DOI の論文が既にあります: ${existing.title}`, 409);
+  }
+  const paper = await ctx.store.insert({
+    title,
+    authors: prefer(input.meta.authors, extracted?.authors),
+    year: input.meta.year ?? extracted?.year ?? null,
+    journal: prefer(input.meta.journal, extracted?.journal),
+    doi,
+    abstract: prefer(input.meta.abstract, extracted?.abstract),
+    category: prefer(input.meta.category, extracted?.category || ingested?.category) || "未分類",
+    background: prefer(input.meta.background, extracted?.background),
+    objective: prefer(input.meta.objective, extracted?.objective),
+    methods: prefer(input.meta.methods, extracted?.methods),
+    results: prefer(input.meta.results, extracted?.results),
+    discussion: prefer(input.meta.discussion, extracted?.discussion),
+    reference: referenceOf({ title, doi, authors: prefer(input.meta.authors, extracted?.authors), year: input.meta.year ?? extracted?.year }),
+    pdfText: extracted?.bodyText || ingested?.plainText || "",
+    driveFileId: ingested?.driveFileId || null,
+    driveUrl: ingested?.driveUrl || "",
+    source: "upload",
+  });
+  return finishSave(ctx, userEmail, paper.id, Boolean(ingested?.driveFileId), warning);
 }
 
 export async function lookupMetadata(ctx: AppContext, input: string): Promise<CitationDraft> {
@@ -238,36 +305,30 @@ export async function addCitation(ctx: AppContext, userEmail: string, draft: Cit
   let driveSaved = false;
   let driveFileId: string | null = null;
   let driveUrl = "";
+  let sections: Partial<ExtractedPaper> = {};
   if (saveOpenAccessPdf && doi) {
     if (!process.env.UNPAYWALL_EMAIL && !ctx.mock) {
       warning = "UNPAYWALL_EMAIL が未設定のため、オープンアクセスPDFは探していません。";
+    } else if (!ctx.drive.configured) {
+      warning = "Drive が未設定のため、書誌だけ登録します。";
     } else {
       try {
-        const bytes = await ctx.fetchOpenAccessPdf(doi);
-        if (!bytes) {
+        const url = await ctx.fetchOpenAccessPdf(doi);
+        if (!url) {
           warning = "オープンアクセスのPDFは見つかりませんでした。書誌だけ登録します。";
         } else {
-          pdfText = await safeText(ctx, bytes);
-          const stored = await storePdf(ctx, bytes, title, draft.year, "未分類");
-          if ("id" in stored) {
+          const ingested = await ctx.drive.importUrl(url, "未分類");
+          if (ingested.driveFileId) {
             driveSaved = true;
-            driveFileId = stored.id;
-            driveUrl = stored.webViewLink;
-          } else {
-            warning = stored.warning;
+            driveFileId = ingested.driveFileId;
+            driveUrl = ingested.driveUrl;
+            pdfText = ingested.extraction?.bodyText || ingested.plainText || "";
+            sections = ingested.extraction ?? {};
           }
         }
       } catch (error) {
         warning = error instanceof Error ? error.message : "PDFの取得に失敗しました";
       }
-    }
-  }
-  let sections: Partial<ExtractedPaper> = {};
-  if (pdfText && ctx.llm.configured) {
-    try {
-      sections = await ctx.llm.structurePaper({ title, abstract: draft.abstract, pdfText });
-    } catch (error) {
-      console.error(error);
     }
   }
   const paper = await ctx.store.insert({
@@ -292,13 +353,7 @@ export async function updatePaper(ctx: AppContext, userEmail: string, id: string
   const updated = await ctx.store.update(id, patch);
   if (!updated) throw new AppError("論文が見つかりません", 404);
   const textChanged = ["title", "abstract", "rdNote", "background", "objective", "methods", "results", "discussion", "crmNote", "pdfText", "authors", "doi"].some((key) => key in patch);
-  if (textChanged) {
-    try {
-      await embedRecord(ctx, updated);
-    } catch (error) {
-      console.error(error);
-    }
-  }
+  if (textChanged) await ctx.store.replaceChunks(id, []);
   return toDetail(await reload(ctx, id, userEmail));
 }
 
@@ -310,107 +365,82 @@ export async function structurePaper(ctx: AppContext, userEmail: string, id: str
   return updatePaper(ctx, userEmail, id, note);
 }
 
-export async function syncDrive(ctx: AppContext, limit = 2) {
-  const bounded = Math.min(5, Math.max(1, limit));
+async function materializeIngest(ctx: AppContext, ingested: IngestedPdf, filename: string): Promise<ExtractedPaper | null> {
+  if (ingested.extraction?.title || ingested.extraction?.bodyText || ingested.extraction?.abstract) return ingested.extraction;
+  const text = ingested.plainText.trim();
+  if (!text || !ctx.llm.configured) return null;
+  return ctx.llm.extractMetadata(text.slice(0, 4000), { filename, categories: (await ctx.store.categories()).map((item) => item.name) });
+}
+
+export async function syncDrive(ctx: AppContext, _limit = 1) {
   const files = await ctx.drive.listPdfs(ctx.driveRootId);
   const known = await ctx.store.listForDriveMatch();
   const candidates: DriveCandidate[] = known.map((paper) => ({ ...paper }));
   const queue = files.filter((file) => !candidates.some((paper) => paper.driveFileId === file.id));
-  const batch = queue.slice(0, bounded);
-  let indexed = 0;
-  let attached = 0;
-  let skipped = 0;
-  const errors: string[] = [];
-  const categories = (await ctx.store.categories()).map((item) => item.name);
-
-  for (const file of batch) {
-    try {
-      const bytes = await ctx.drive.download(file.id);
-      const text = await safeText(ctx, bytes);
-      const plan = planDriveFile({ id: file.id, name: file.name, text }, candidates);
-      if (plan.action === "skip") {
-        skipped += 1;
-        continue;
-      }
-      if (plan.action === "attach") {
-        const patch: PaperPatch = { driveFileId: file.id, driveUrl: file.webViewLink };
-        if (text) patch.pdfText = text;
-        const updated = await ctx.store.update(plan.id, patch);
-        if (updated) {
-          candidates.forEach((paper) => {
-            if (paper.id === plan.id) paper.driveFileId = file.id;
-          });
-          try {
-            await embedRecord(ctx, updated);
-          } catch (error) {
-            console.error(error);
-          }
-        }
-        attached += 1;
-        continue;
-      }
-      let extracted: ExtractedPaper | null = null;
-      if (text && ctx.llm.configured) {
-        try {
-          extracted = await ctx.llm.extractMetadata(text, { filename: file.name, categories });
-        } catch (error) {
-          console.error(error);
-        }
-      }
-      const doi = extracted?.doi || extractDoi(text) || "";
-      if (doi) {
-        const existing = candidates.find((paper) => paper.doi && paper.doi.toLowerCase() === doi.toLowerCase());
-        if (existing && !existing.driveFileId) {
-          const updated = await ctx.store.update(existing.id, { driveFileId: file.id, driveUrl: file.webViewLink, ...(text ? { pdfText: text } : {}) });
-          existing.driveFileId = file.id;
-          if (updated) {
-            try { await embedRecord(ctx, updated); } catch (error) { console.error(error); }
-          }
-          attached += 1;
-          continue;
-        }
-        if (existing?.driveFileId) {
-          skipped += 1;
-          continue;
-        }
-      }
-      const title = extracted?.title || file.name.replace(/\.pdf$/i, "");
-      const category = file.parentName || extracted?.category || "未分類";
-      const created = await ctx.store.insert({
-        title,
-        authors: extracted?.authors,
-        year: extracted?.year,
-        journal: extracted?.journal,
-        doi,
-        abstract: extracted?.abstract || text.slice(0, 600),
-        category,
-        background: extracted?.background,
-        objective: extracted?.objective,
-        methods: extracted?.methods,
-        results: extracted?.results,
-        discussion: extracted?.discussion,
-        reference: referenceOf({ ...(extracted ?? { title }), title, doi }),
-        pdfText: text,
-        driveFileId: file.id,
-        driveUrl: file.webViewLink,
-        source: "drive",
-      });
-      candidates.push({ id: created.id, title: created.title, doi: created.doi, driveFileId: file.id });
-      try { await embedRecord(ctx, created); } catch (error) { console.error(error); }
-      indexed += 1;
-    } catch (error) {
-      errors.push(`${file.name}: ${error instanceof Error ? error.message : "取り込めませんでした"}`);
+  const file = queue[0];
+  if (!file) return { seen: files.length, indexed: 0, attached: 0, skipped: 0, errors: [] as string[], remaining: 0 };
+  try {
+    const ingested = await ctx.drive.ingest(file.id);
+    const extracted = await materializeIngest(ctx, ingested, file.name);
+    const text = extracted?.bodyText || ingested.plainText || "";
+    const plan = planDriveFile({ id: file.id, name: file.name, text }, candidates);
+    if (plan.action === "skip") {
+      return { seen: files.length, indexed: 0, attached: 0, skipped: 1, errors: [] as string[], remaining: Math.max(0, queue.length - 1) };
     }
+    if (plan.action === "attach") {
+      await ctx.store.update(plan.id, {
+        driveFileId: file.id,
+        driveUrl: ingested.driveUrl || file.webViewLink,
+        ...(text ? { pdfText: text } : {}),
+        ...(extracted?.abstract ? { abstract: extracted.abstract } : {}),
+        ...(extracted?.background ? { background: extracted.background } : {}),
+        ...(extracted?.objective ? { objective: extracted.objective } : {}),
+        ...(extracted?.methods ? { methods: extracted.methods } : {}),
+        ...(extracted?.results ? { results: extracted.results } : {}),
+        ...(extracted?.discussion ? { discussion: extracted.discussion } : {}),
+      });
+      return { seen: files.length, indexed: 0, attached: 1, skipped: 0, errors: [] as string[], remaining: Math.max(0, queue.length - 1) };
+    }
+    const doi = extracted?.doi || extractDoi(text) || "";
+    const existing = doi ? candidates.find((paper) => paper.doi && paper.doi.toLowerCase() === doi.toLowerCase()) : undefined;
+    if (existing && !existing.driveFileId) {
+      await ctx.store.update(existing.id, { driveFileId: file.id, driveUrl: ingested.driveUrl || file.webViewLink, ...(text ? { pdfText: text } : {}) });
+      return { seen: files.length, indexed: 0, attached: 1, skipped: 0, errors: [] as string[], remaining: Math.max(0, queue.length - 1) };
+    }
+    if (existing?.driveFileId) {
+      return { seen: files.length, indexed: 0, attached: 0, skipped: 1, errors: [] as string[], remaining: Math.max(0, queue.length - 1) };
+    }
+    const title = extracted?.title || file.name.replace(/\.pdf$/i, "");
+    await ctx.store.insert({
+      title,
+      authors: extracted?.authors,
+      year: extracted?.year,
+      journal: extracted?.journal,
+      doi,
+      abstract: extracted?.abstract || text.slice(0, 600),
+      category: file.parentName || extracted?.category || ingested.category || "未分類",
+      background: extracted?.background,
+      objective: extracted?.objective,
+      methods: extracted?.methods,
+      results: extracted?.results,
+      discussion: extracted?.discussion,
+      reference: referenceOf({ ...(extracted ?? { title }), title, doi }),
+      pdfText: text,
+      driveFileId: file.id,
+      driveUrl: ingested.driveUrl || file.webViewLink,
+      source: "drive",
+    });
+    return { seen: files.length, indexed: 1, attached: 0, skipped: 0, errors: [] as string[], remaining: Math.max(0, queue.length - 1) };
+  } catch (error) {
+    return {
+      seen: files.length,
+      indexed: 0,
+      attached: 0,
+      skipped: 0,
+      errors: [`${file.name}: ${error instanceof Error ? error.message : "取り込めませんでした"}`],
+      remaining: queue.length,
+    };
   }
-
-  return {
-    seen: files.length,
-    indexed,
-    attached,
-    skipped,
-    errors,
-    remaining: Math.max(0, queue.length - batch.length),
-  };
 }
 
 export type { PaperSummary, PaperDetail };

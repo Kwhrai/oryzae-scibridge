@@ -1,3 +1,4 @@
+import { readPdfFromGemini } from "@/lib/llm/gemini-file";
 import { AppError } from "@/lib/app-error";
 import { EMBEDDING_DIM, embeddingModel, geminiModel } from "@/lib/config";
 import { extractionPrompt, normalizeExtraction, parseModelJson, structurePrompt } from "@/lib/papers/model-json";
@@ -26,6 +27,11 @@ function textOf(payload: unknown): string {
 export function createGeminiClient(env: Env, fetchImpl: typeof fetch = fetch): LlmClient {
   return {
     configured: true,
+    async readPdf(input) {
+      const apiKey = env.GEMINI_API_KEY?.trim();
+      if (!apiKey) throw new AppError("GEMINI_API_KEY が未設定です。意味検索とAI抽出を使うには設定してください。", 503, "setup");
+      return readPdfFromGemini({ ...input, apiKey, model: geminiModel(env), fetchImpl });
+    },
     async extractMetadata(text, hints) {
       const payload = await gemini(env, `models/${geminiModel(env)}:generateContent`, {
         contents: [{ role: "user", parts: [{ text: extractionPrompt(text, hints) }] }],
@@ -83,5 +89,5 @@ export function createDisabledLlm(): LlmClient {
   const fail = async () => {
     throw new AppError("GEMINI_API_KEY が未設定です。意味検索とAI抽出を使うには設定してください。", 503, "setup");
   };
-  return { configured: false, extractMetadata: fail, structurePaper: fail, embed: fail };
+  return { configured: false, extractMetadata: fail, readPdf: fail, structurePaper: fail, embed: fail };
 }

@@ -61,19 +61,12 @@ async function lookupPmid(pmid: string, fetchImpl: FetchLike): Promise<CitationD
   return pubmedSummaryToDraft(summary as Parameters<typeof pubmedSummaryToDraft>[0], abstract);
 }
 
-export async function fetchOpenAccessPdf(doi: string, fetchImpl: FetchLike = fetch): Promise<Uint8Array | null> {
+export async function fetchOpenAccessPdf(doi: string, fetchImpl: FetchLike = fetch): Promise<string | null> {
   const email = process.env.UNPAYWALL_EMAIL?.trim();
   if (!email || !doi) return null;
   const response = await fetchImpl(`https://api.unpaywall.org/v2/${encodeURIComponent(normalizeDoi(doi))}?email=${encodeURIComponent(email)}`);
   if (!response.ok) return null;
   const payload = await response.json();
   const { unpaywallPdfUrl } = await import("@/lib/metadata/crossref");
-  const pdfUrl = unpaywallPdfUrl(payload);
-  if (!pdfUrl) return null;
-  const pdfResponse = await fetchImpl(pdfUrl, { signal: AbortSignal.timeout(20_000) });
-  if (!pdfResponse.ok) return null;
-  const bytes = new Uint8Array(await pdfResponse.arrayBuffer());
-  if (bytes.byteLength < 5 || bytes.byteLength > 15_000_000) return null;
-  const head = new TextDecoder().decode(bytes.slice(0, 5));
-  return head.startsWith("%PDF") ? bytes : null;
+  return unpaywallPdfUrl(payload);
 }

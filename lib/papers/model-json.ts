@@ -11,6 +11,8 @@ export type ExtractedPaper = {
   methods: string;
   results: string;
   discussion: string;
+  summary: string;
+  bodyText: string;
 };
 
 export function parseModelJson(text: string): unknown {
@@ -45,6 +47,8 @@ export function normalizeExtraction(value: unknown): ExtractedPaper {
     methods: asString(record.methods),
     results: asString(record.results),
     discussion: asString(record.discussion),
+    summary: asString(record.summary).slice(0, 800),
+    bodyText: asString(record.bodyText).slice(0, 4000),
   };
 }
 

@@ -17,8 +17,8 @@ export function pemToDer(pem: string): Uint8Array {
   return base64UrlToBytes(body.replaceAll("+", "-").replaceAll("/", "_"));
 }
 
-export async function signRs256Jwt(privateKeyPem: string, payload: Record<string, unknown>): Promise<string> {
-  const header = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
+export async function signRs256Jwt(privateKeyPem: string, payload: Record<string, unknown>, kid?: string): Promise<string> {
+  const header = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT", ...(kid ? { kid } : {}) })));
   const body = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
   const unsigned = `${header}.${body}`;
   const der = pemToDer(privateKeyPem);

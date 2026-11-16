@@ -1,117 +1,142 @@
-# SciBridge のセットアップ（Cloudflare）
+# SciBridge のセットアップ
 
-論文・メモ・ブックマークは Cloudflare D1、意味検索のベクトルは Cloudflare Vectorize、画面と API は Cloudflare Workers です。PDF の原本はこれまでどおり Google ドライブの共有フォルダに置きます。Neon と Vercel は使いません。
+Cloud Console は使いません。Workspace の管理者が 2 段階認証を有効にしていないため、コンソールも OAuth クライアントもサービスアカウントも作れません。ログインは Cloudflare Access、PDF は自分の Google アカウントで動く Apps Script、記録は D1、意味検索は Vectorize です。
 
-秘密情報は `wrangler secret put` か、手元用の `.dev.vars` にだけ置きます。リポジトリには書きません。名前の一覧は `.env.example` です。
+秘密は `wrangler secret put` か手元の `.dev.vars` だけに置きます。名前の一覧は `.env.example` です。
 
 ## 0. 先に決めておくこと
 
-- Worker 名: `oryzae-scibridge`（`wrangler.jsonc` の `name`）
-- ログインできる人: Google Workspace の `@oryzae.site` だけ
-- PDF の置き場: 共有ドライブのフォルダ「既報研究（ORYZAE Scibridge）」  
-  フォルダ ID `1f8kMQgoqvp9H0IIwzD6BAZ2-vcqIHHun`（`vars.DRIVE_ROOT_FOLDER_ID`）
-- このフォルダは「リンクを知っている全員」にしない
-- 埋め込みは Gemini `gemini-embedding-001` の **768 次元**、距離は **cosine**。索引を作ったあと次元は変えられません
-- Workers AI にはしていません。日本語と英語が混ざる論文の検索は Gemini の埋め込みの方が安定で、項目抽出も同じ API キーで足ります。Workers AI の多言語モデルに乗り換えると、Vectorize の索引を作り直す必要があります
+- Worker 名は `oryzae-scibridge` です。
+- 入れる人は `@oryzae.site` のメールだけです。入口は Cloudflare Access のワンタイム PIN です。
+- PDF の置き場は共有ドライブのフォルダ「既報研究（ORYZAE Scibridge）」です。フォルダ ID は `1f8kMQgoqvp9H0IIwzD6BAZ2-vcqIHHun` で、`wrangler.jsonc` に入っています。このフォルダを「リンクを知っている全員」にはしないでください。
+- 埋め込みは **768 次元、cosine** のままです。既にある索引 `scibridge-papers` は作り直さなくてよいです。
+- Gemini の埋め込みが使えないときは Workers AI の `@cf/baai/bge-base-en-v1.5`（これも 768 次元）に落ちます。`@cf/baai/bge-m3` は 1024 次元なので、それに替えるときだけ索引を削除して作り直します。
+- Gemini と Workers AI のベクトルは同じ 768 個でも別の空間です。途中で切り替えたら、画面の「意味検索の索引」をやり直す前に、古いベクトルを消してください。索引そのものは残してよいです。
 
 ## 1. 古い Vercel について（ここでは触りません）
 
-https://oryzae-scibridge.vercel.app は、以前の公開 CSV アプリのままです。このリポジトリを Cloudflare に移しても、Vercel のプロジェクトが Git につながったままだと、`main` へのマージで Vercel がまたビルドします。ビルドが失敗すれば古い公開アプリが残ります。ビルドが通ると、ログイン無しの経路が混ざる恐れがあります。
+https://oryzae-scibridge.vercel.app は、以前の公開 CSV アプリのままです。この作業では Vercel を操作しません。`main` へマージする前に、Vercel のダッシュボードで Git 接続を外すか、プロジェクトを止めてください。Cloudflare 側が動いてからそのプロジェクトを削除すると、公開 CSV はインターネットから消えます。Vercel にデータベースは無いので、消えるのは古い静的アプリだけです。
 
-マージする前に、Vercel のダッシュボードでこのプロジェクトの Git 接続を外すか、プロジェクトを一時停止してください。Cloudflare 側が動いてから、その Vercel プロジェクトを削除すると、公開 CSV はインターネットから消えます。データベースは Vercel に無いので、消えるのは古い静的アプリだけです。
+## 2. Cloudflare にログインする
 
-## 2. Cloudflare アカウントと Wrangler
+Node.js 22 以上です。
 
 ```bash
 npm install
 npx wrangler login
 ```
 
-Node.js 22 以上。課金は Workers Paid を想定しています。Free プランの CPU は 1 リクエスト 10ms で、PDF の本文抽出は足りません。Paid の既定は 30 秒で、論文 PDF の抽出と Drive 同期に足ります。
+最初は Workers の無料プランで動かす想定です。1 リクエストの CPU は 10ms です。PDF の読み取りと Gemini への送信は Apps Script がやるので、Worker は待っているあいだ CPU を使いません。画面に `1102` や `Worker exceeded CPU time limit` が出て、待っても直らないときだけ Workers Paid（月 5 ドル）へ上げてください。Paid は任意です。
 
-## 3. D1（論文・メモ・ブックマーク）— 済
+## 3. D1 — 済
 
-データベース `scibridge` は作成済みです（APAC、`database_id` `3b221813-3db3-4bf6-8258-ad7380182a55`）。この ID は `wrangler.jsonc` に入っています。`npx wrangler d1 create` は再実行しないでください。
+データベース `scibridge` は作成済みです（APAC、`database_id` `3b221813-3db3-4bf6-8258-ad7380182a55`）。`wrangler.jsonc` に入っています。`wrangler d1 create` は再実行しないでください。
+
+まだ一度も流していない場合だけ、テーブルを作ります。
 
 ```bash
-npm run db:migrate:local
 npm run db:migrate
 ```
 
-`migrations/0001_init.sql` がテーブルを作ります。既存 9 件の CSV は、初回アクセスで空のテーブルに入ります。`legacy_id` が同じ行は上書きしないので、メモを直したあとに再起動してもその修正は残ります。
+9 件の CSV は、デプロイ後に画面を開くと 1 件ずつ入ります。起動の瞬間に 9 件まとめては入れません。
 
-## 4. Vectorize（意味検索）— 済
+## 4. Vectorize — 済
 
-索引 `scibridge-papers` は作成済みです（768 次元、cosine）。`paperId`（string）のメタデータ索引もあります。作り直さないでください。バインディング名は `VECTORIZE` で、`wrangler.jsonc` に書いてあります。
+索引 `scibridge-papers` は作成済みです。768 次元、cosine、メタデータの `paperId` も付いています。作り直さないでください。
 
-ログイン後、一覧の「意味検索の索引」を最後まで押すと、移行した 9 件のベクトルが入ります。Vectorize への書き込みは数秒遅れて検索に出ることがあります。
+Workers AI の `@cf/baai/bge-m3` に替える場合だけ、次元が 1024 になるので索引を削除して作り直します。既定のフォールバック `@cf/baai/bge-base-en-v1.5` は 768 のままです。
 
-## 5. Google ログイン（oryzae.site だけ）
+## 5. Cloudflare Access（ログイン）
 
-Workspace の管理者権限がある Google Cloud プロジェクトで行います。
+Zero Trust の無料枠で足ります。Google の OAuth クライアントは作りません。
 
-1. OAuth 同意画面のユーザーの種類は **内部**。
-2. 認証情報 → OAuth クライアント ID → ウェブ アプリケーション。
-3. 承認済みのリダイレクト URI。使わない URL は入れない。
-
-```text
-http://localhost:3000/api/auth/callback/google
-https://oryzae-scibridge.<アカウントのサブドメイン>.workers.dev/api/auth/callback/google
-https://<独自ドメイン>/api/auth/callback/google
-```
-
-アプリはリクエストのオリジンからリダイレクト URI を作ります。`hd` パラメータはヒントだけで、判定は ID トークンです。確認済みメールが `@oryzae.site` で、トークンの `hd` も `oryzae.site` のときだけクッキーを発行します。
+1. [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) を開く。チーム名を決める。例: `oryzae`。この名前が `https://oryzae.cloudflareaccess.com` になります。
+2. Settings → Authentication で、One-time PIN を有効にする。
+3. Access → Applications → Add an application → Self-hosted。
+4. アプリケーション名は `SciBridge`。ドメインは、このあとデプロイする Worker のホスト名（`oryzae-scibridge.<アカウント>.workers.dev` か、付けた独自ドメイン）にする。まだデプロイ前なら、ホスト名を先に決めてからここに書く。
+5. ポリシーは Allow。Include の Selector を Emails ending in にして、値を `oryzae.site` にする。他の条件は足さない。
+6. 身份の方法は One-time PIN。
+7. 保存したあと、アプリケーションの設定にある **Application Audience (AUD) Tag** をコピーする。
+8. 秘密を入れる。
 
 ```bash
-npx wrangler secret put AUTH_GOOGLE_ID
-npx wrangler secret put AUTH_GOOGLE_SECRET
-openssl rand -base64 32
-npx wrangler secret put AUTH_SECRET
+npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
+# 例: oryzae
+npx wrangler secret put CF_ACCESS_AUD
+# コピーした AUD タグ
 ```
 
-`ALLOWED_EMAIL_DOMAIN` は `wrangler.jsonc` の `vars` で `oryzae.site` です。変えるときだけここを編集します。
+アプリはリクエストの `Cf-Access-Jwt-Assertion` を、`https://<チーム>.cloudflareaccess.com/cdn-cgi/access/certs` の公開鍵で検証します。AUD が一致し、メールが `@oryzae.site` で終わるときだけ通します。証明書と検証済みトークンは Worker のメモリに少しのあいだ覚えます。
 
-## 6. Google Drive（サービスアカウント）
+ログアウトは `/cdn-cgi/access/logout` です。
 
-ユーザーごとの Drive 同意は取りません。共有ドライブを見るサービスアカウントです。
+`workers.dev` のプレビュー URL を Access の対象に入れ忘れると、その URL は公開されたままです。使うホストはすべて Access のアプリケーションに入れてください。
 
-1. 同じ Google Cloud プロジェクトで **Google Drive API** を有効にする。
-2. サービスアカウントを作り、JSON 鍵をダウンロードする。リポジトリには置かない。
-3. JSON の `client_email` と `private_key` をシークレットにする。
+## 6. Apps Script（Drive と PDF の読み取り）
+
+自分の Google アカウントで [script.google.com](https://script.google.com) を開きます。共有ドライブのフォルダを見られるアカウントで作ってください。
+
+1. 新しいプロジェクトを作る。
+2. `apps-script/Code.gs` の中身を、エディタの `コード.gs` に貼る。
+3. プロジェクト設定の「appsscript.json を表示」をオンにし、`apps-script/appsscript.json` の中身を貼る。
+4. 左の「サービス」から **Drive API**（高度なサービス）を追加する。Gemini のキーが無いときのテキスト抜き出しに使います。追加できなくても、Gemini のキーがあれば PDF の読み取りは動きます。追加に失敗しても Cloud Console は開かないでください。
+5. プロジェクトの設定 → スクリプト プロパティ。
+   - `APPS_SCRIPT_SECRET`: `openssl rand -base64 32` の結果。Worker と同じ値。
+   - `GEMINI_API_KEY`: 手順 7 で取れたときだけ。取れなければ空のまま。
+6. デプロイ → 新しいデプロイ → 種類「ウェブアプリ」。
+   - 実行ユーザー: **自分**
+   - アクセスできるユーザー: **全員**
+7. 表示された URL（`https://script.google.com/macros/s/.../exec`）をコピーする。
 
 ```bash
-npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_EMAIL
-npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY
+npx wrangler secret put APPS_SCRIPT_URL
+npx wrangler secret put APPS_SCRIPT_SECRET
 ```
 
-`private_key` の改行は `\n` のままで構いません。アプリが実改行に戻します。
+ブラウザはこの秘密を知りません。アップロードはブラウザが PDF を base64 にし、Worker がその文字列を Apps Script へ流します。秘密は Worker がクエリに付けます。Apps Script は独自の HTTP ヘッダーを読めず、`/exec` への POST はリダイレクトで本文が落ちるため、Worker は最初に小さな GET で転送先を覚え、そこへ本文を送ります。
 
-4. 共有ドライブ「既報研究（ORYZAE Scibridge）」のメンバーに、そのメールを **コンテンツ管理者** で追加する。フォルダの共有だけでは、共有ドライブでは一覧やアップロードが失敗することがあります。ドメイン全体の委任は使わない。
+Apps Script が PDF を読み、Gemini が使えるときは項目の JSON だけを Worker に返します。大きな PDF と base64 は Worker の 10ms に載せません。
 
-スコープは `https://www.googleapis.com/auth/drive` です。このアカウントを他のドライブのメンバーにしないでください。
+公開クォータ（[Google の一覧](https://developers.google.com/apps-script/guides/services/quotas)、2026-09 時点。予告なく変わります）:
 
-同期は「論文を追加 → Drive → Driveを同期」。サブフォルダも辿ります。アップロードはカテゴリ名のサブフォルダに入ります。1 回の同期リクエストでは PDF を 1 件だけ読むので、画面が残り件数を見ながら繰り返します。
+- 1 回の実行は 6 分
+- UrlFetch の POST と応答はそれぞれ 50MB。20MB の PDF を base64 にすると約 27MB なので、この上限の内側です
+- UrlFetch の URL は 2KB
+- UrlFetch は、コンシューマ アカウントで 1 日 2 万回、Workspace アカウントで 1 日 10 万回（そのユーザーの全部のスクリプトで共有）
 
-## 7. Gemini
+1 日に数十本の論文を入れる分には足ります。毎日何千本も流す使い方は想定していません。
 
-https://aistudio.google.com/apikey でキーを作ります。
+## 7. Gemini のキー（AI Studio）
+
+[Google AI Studio](https://aistudio.google.com/apikey) で API キーを作ります。Cloud Console は経由しません。
+
+取れたら、Worker と Apps Script の両方に置きます。Worker は意味検索の埋め込み（`gemini-embedding-001`、768 次元）に使います。Apps Script は PDF の項目抽出に使います。
 
 ```bash
 npx wrangler secret put GEMINI_API_KEY
 ```
 
-モデル名は `vars` の `GEMINI_MODEL`（`gemini-2.5-flash`）と `GEMINI_EMBEDDING_MODEL`（`gemini-embedding-001`）です。埋め込みは 768 次元固定です。モデルを変えても `outputDimensionality` は 768 のままにしてください。次元を変えるには Vectorize の索引を削除して作り直します。
+Apps Script 側は手順 6 のスクリプト プロパティ `GEMINI_API_KEY` です。モデル名は変えない限り、スクリプトプロパティ `GEMINI_MODEL` は空でよいです（既定 `gemini-2.5-flash`）。
 
-鍵が無いときもキーワード検索と手入力は動きます。
+AI Studio も同じ 2 段階認証の制限で開けない場合は、キーを空のままにします。そのときの動きは次のとおりです。
 
-## 8. 任意: オープンアクセス PDF
+- 埋め込みと、短いテキストからの項目整理は Workers AI です。埋め込みは `@cf/baai/bge-base-en-v1.5`（768 次元）。文章の整理は `@cf/meta/llama-3.1-8b-instruct`。Workers AI には 1 日の無料枠があります。
+- PDF そのものは Workers AI に送りません。Apps Script が Drive の「Google ドキュメントへコピー」でテキストを抜けるときだけ、その短いテキストを Worker が整理します。高度な Drive サービスが使えないときは、ファイル名と手入力のメモだけになります。
+- 日本語のうろ覚え検索は、Gemini の埋め込みより弱くなります。次元は 768 のままなので、索引の作り直しは不要です。
+- 強制するときは `npx wrangler secret put LLM_PROVIDER` に `workers-ai` と入れます。未設定の `auto` は、`GEMINI_API_KEY` があれば Gemini、無ければ Workers AI です。
+
+`bge-base-en-v1.5` の入力はおおよそ 512 トークンです。Worker は埋め込みに渡す文章を 800 字に切っています。
+
+## 8. 任意の連絡用メール
+
+オープンアクセスの PDF を DOI から探すときだけ使います。Worker は URL を見つけるだけで、ファイルのダウンロードは Apps Script がします。
 
 ```bash
 npx wrangler secret put UNPAYWALL_EMAIL
 npx wrangler secret put CROSSREF_MAILTO
 ```
 
-`UNPAYWALL_EMAIL` が空なら、DOI 登録時に PDF は探さず書誌だけ保存します。
+空でも、書誌の検索自体は動きます。PDF の自動保存だけがスキップされます。
 
 ## 9. デプロイ
 
@@ -121,59 +146,45 @@ npm run build
 npm run deploy
 ```
 
-独自ドメインは Cloudflare ダッシュボードの Worker → 設定 → ドメイン、または
+デプロイしたホスト名を、手順 5 の Access アプリケーションに入れます。入れたあと、その URL を開くとメールのワンタイム PIN を聞かれます。PIN の宛先が `@oryzae.site` でない人は入れません。
 
-```bash
-npx wrangler deploy --domain <ホスト名>
-```
+## 10. 最初の索引
 
-のあと、上のリダイレクト URI にそのホストを追加します。`workers.dev` の URL はデプロイ出力に出ます。
+1. Access を通って画面を開く。CSV の 9 件が 1 件ずつ入ります。
+2. 「Driveを同期」を押す。共有ドライブの PDF を 1 件ずつ取り込みます。ボタンは残りが無くなるまで繰り返します。
+3. 「意味検索の索引」を押す。1 件ずつベクトルを作ります。`0/9` のような表示が `9/9` になるまで待ちます。
 
-プレビュー URL は知っている人なら開けます。社外に見せないなら、独自ドメインと Google の「内部」同意画面に寄せ、`workers.dev` をダッシュボードで無効にすることを検討してください。
+キーワード検索は索引の前から使えます。意味検索は索引のあとです。
 
-## 10. 手元で動かす
-
-鍵なしで画面だけ見るとき:
+## 11. 手元で画面だけ見る
 
 ```bash
 npm run dev:mock
 ```
 
-http://localhost:3000 です。起動中だけ `.dev.vars` に `SCI_BRIDGE_MOCK=1` と `AUTH_DISABLED=true` を足し、終了すると元に戻します。ログインはスキップします。D1 は Wrangler のローカルデータベースです。Vectorize はローカル模擬が無いので、意味検索のベクトルはプロセス内のテスト用ベクトルです。Drive も空の模擬なので、同期しても共有ドライブの PDF は出てきません。この二つのフラグは本番では無視されます。シークレットには入れないでください。
+http://localhost:3000 です。起動中だけ `.dev.vars` に `SCI_BRIDGE_MOCK=1` と `AUTH_DISABLED=true` を足し、終了すると元に戻します。ログインは飛ばします。Drive と Gemini は空の模擬です。Vectorize のローカル模擬は無いので、意味検索のベクトルはこのプロセスの中だけにあります。Workers AI のバインディングも外します。このバインディングはローカル模擬が無く、残すと Wrangler が Cloudflare へのログインを要求するためです。この二つのフラグは本番では無視されます。シークレットには入れないでください。
 
-本番と同じ鍵で手元から見るときは `.dev.vars` に `.env.example` の項目を書き、`npm run dev` です。`.dev.vars` は git に入りません。
+`npm run dev` は `wrangler.jsonc` の Workers AI バインディングを残します。ローカル模擬が無いので、`npx wrangler login` 済みでないと起動時にログインを聞きます。モックで画面を見るだけなら `dev:mock` で足ります。
 
-```bash
-npm run db:migrate:local
-```
+本番と同じ経路を手元で見るときは、`.dev.vars` に手順 5 から 8 の値を書いて `npm run dev` です。Access の JWT は localhost には付かないので、画面を通すには `AUTH_DISABLED=true` が要ります。
 
-## 11. PDF の大きさ
+## 12. アップロードの大きさ
 
-Cloudflare のゾーンが Free / Pro なら、Worker に届くリクエスト本体は 100MB までです。Worker のメモリは 128MB で、PDF の展開と本文抽出がここに載ります。アプリは **20MB まで**受け取ります。それより大きいファイルは共有ドライブに直接置き、「Driveを同期」します。以前の 4MB は Vercel の制限でした。
+ブラウザで選ぶ PDF は 20MB までです。それより大きいファイルは共有ドライブのカテゴリフォルダに置いてから「Driveを同期」します。20MB は base64 で約 27MB になり、Workers 無料プランのリクエスト本文（100MB）と Apps Script の POST（50MB）のどちらにも収まります。
 
-Free プランの CPU 10ms では本文抽出は失敗します。Workers Paid にしてください。
+## 13. デプロイ後の確認
 
-## 12. デプロイ後に確認すること
+- `@oryzae.site` 以外のメールでは PIN のあと入れない
+- 一覧に移行した 9 件が出る。DOI が `TRUE` や `FALSE` の行は無い
+- 「排便」で麹甘酒の論文に届く
+- ブックマークは自分のメールアドレスだけに残る
+- PDF を 1 件保存すると、共有ドライブのカテゴリフォルダにファイルができ、詳細に Drive のリンクが出る
+- `1102` が出たら、手順 2 の Paid を検討する
 
-1. ログアウト状態ではログイン画面だけが出る。論文タイトルも Drive の URL も出ない。
-2. `@oryzae.site` で入れる。`@gmail.com` は断られる。
-3. 論文が 9 件ある。排便頻度の論文の DOI が `10.3390/jof7090782` で、Drive はファイル URL。
-4. 「意味検索の索引」を最後まで押す。
-5. 「排便の甘酒」でその論文が上に出る。
-6. Drive を同期し、共有ドライブの PDF が増える。既にある DOI やファイルは二重にならない。
-7. 20MB 以下の PDF をアップロードし、Drive のカテゴリフォルダにファイルがある。
-8. スマホ幅で検索して開ける。
+## 14. ここまでで実機確認していないこと
 
-Drive が 403 のときは、サービスアカウントが共有ドライブのメンバーか、Drive API が有効かを見ます。意味検索がキーワードだけなら、`GEMINI_API_KEY` と索引の件数を見ます。
-
-## 13. まだ実サービスに繋いでいないこと
-
-この環境にはオリゼの Cloudflare アカウントも Google の鍵もありません。次は実装と、ローカルのテスト（D1 と同じ SQL を Node の SQLite で実行、Vectorize の代わりにメモリ上のコサイン類似）までです。
-
-- `wrangler login` 以降の D1 作成、Vectorize 作成、シークレット、デプロイ
-- Google ログインの画面遷移と、実 ID トークンの `hd`
-- サービスアカウントでの共有ドライブ一覧・アップロード・ダウンロード
-- Gemini の実応答
-- Crossref / PubMed / Unpaywall への実リクエスト（応答の形だけ固定データでテスト）
-- unpdf による実 PDF のテキスト抽出
-- Workers Paid での CPU 時間と、20MB 近い PDF のメモリ
+- Cloudflare Access の実 JWT
+- デプロイした Apps Script と、共有ドライブへの書き込み
+- AI Studio のキー、およびキーが取れないときの Workers AI
+- `npm run db:migrate` がリモート D1 に適用済みかどうか。未適用なら手順 3 を一度だけ実行する
+- 本番の Vectorize への投入。索引の作成自体は済んでいます

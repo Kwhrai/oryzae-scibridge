@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { accessClaimsAllowed, verifyAccessJwt } from "@/lib/auth/access";
 import { hostedDomainFromIdToken, isAllowedWorkspaceUser } from "@/lib/auth/domain";
-import { googleIdClaimsAllowed } from "@/lib/auth/google";
 import { derToPem, signRs256Jwt, verifyRs256Jwt } from "@/lib/auth/jwt";
-import { readSession, signSession } from "@/lib/auth/session-cookie";
-import { authBypassEnabled, mockModeEnabled, normalizePrivateKey } from "@/lib/config";
+import { authBypassEnabled, mockModeEnabled } from "@/lib/config";
+import { timingSafeEqual } from "@/lib/secret";
+import { createMockLlm } from "@/lib/llm/mock";
+import { readPdfFromGemini } from "@/lib/llm/gemini-file";
 import { extractDoi, extractPmid } from "@/lib/papers/doi";
 import { queryTokens, snippetAround } from "@/lib/papers/text";
 import { cosineSimilarity, hashEmbedding, keywordScore, mergeScores } from "@/lib/papers/rank";
@@ -36,31 +38,22 @@ describe("workspace access", () => {
     expect(hostedDomainFromIdToken(`x.${payload}.y`)).toBe("oryzae.site");
   });
 
-  it("accepts a signed session cookie only for the company domain", async () => {
-    const token = await signSession({ email: "ai@oryzae.site", name: "Ai", hd: "oryzae.site" }, "secret", 1_000);
-    const session = await readSession(token, "secret", { now: 1_000, domain: "oryzae.site" });
-    expect(session?.email).toBe("ai@oryzae.site");
-    expect(await readSession(token, "other-secret", { now: 1_000, domain: "oryzae.site" })).toBeNull();
-    expect(await readSession(token, "secret", { now: 1_000, domain: "example.com" })).toBeNull();
-  });
-
-  it("checks Google ID token claims and can sign a service-account JWT", async () => {
-    expect(googleIdClaimsAllowed({
-      iss: "https://accounts.google.com",
-      aud: "client",
-      exp: 2_000,
-      email: "ai@oryzae.site",
-      email_verified: true,
-      hd: "oryzae.site",
-    }, "client", "oryzae.site", 1_000)).toBe(true);
-    expect(googleIdClaimsAllowed({
-      iss: "https://accounts.google.com",
-      aud: "client",
-      exp: 2_000,
+  it("accepts a Cloudflare Access JWT for the company domain and rejects the others", async () => {
+    const now = 1_700_000_000_000;
+    expect(accessClaimsAllowed({
+      iss: "https://oryzae.cloudflareaccess.com",
+      aud: ["aud-tag"],
+      exp: Math.floor(now / 1000) + 60,
+      email: "Ai.Kawahara@oryzae.site",
+    }, { aud: "aud-tag", team: "oryzae", domain: "oryzae.site", now })).toBe(true);
+    expect(accessClaimsAllowed({
+      iss: "https://oryzae.cloudflareaccess.com",
+      aud: "aud-tag",
+      exp: Math.floor(now / 1000) + 60,
       email: "ai@gmail.com",
-      email_verified: true,
-      hd: "gmail.com",
-    }, "client", "oryzae.site", 1_000)).toBe(false);
+    }, { aud: "aud-tag", team: "oryzae", domain: "oryzae.site", now })).toBe(false);
+    expect(timingSafeEqual("same-secret", "same-secret")).toBe(true);
+    expect(timingSafeEqual("same-secret", "other-secret")).toBe(false);
 
     const pair = await crypto.subtle.generateKey(
       { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
@@ -68,9 +61,22 @@ describe("workspace access", () => {
       ["sign", "verify"],
     );
     const pem = derToPem(await crypto.subtle.exportKey("pkcs8", pair.privateKey), "PRIVATE KEY");
-    const jwt = await signRs256Jwt(pem, { iss: "drive@oryzae.site" });
-    const verified = await verifyRs256Jwt(jwt, pair.publicKey);
-    expect(verified?.iss).toBe("drive@oryzae.site");
+    const jwk = { ...(await crypto.subtle.exportKey("jwk", pair.publicKey)), kid: "test-key" };
+    const token = await signRs256Jwt(pem, {
+      iss: "https://oryzae.cloudflareaccess.com",
+      aud: "aud-tag",
+      exp: Math.floor(Date.now() / 1000) + 120,
+      email: "ai@oryzae.site",
+      name: "Ai",
+    }, "test-key");
+    const identity = await verifyAccessJwt(token, {
+      CF_ACCESS_TEAM_DOMAIN: "oryzae",
+      CF_ACCESS_AUD: "aud-tag",
+      ALLOWED_EMAIL_DOMAIN: "oryzae.site",
+    }, async () => Response.json({ keys: [jwk] }));
+    expect(identity?.email).toBe("ai@oryzae.site");
+    const verified = await verifyRs256Jwt(token, pair.publicKey);
+    expect(verified?.email).toBe("ai@oryzae.site");
   });
 
   it("never enables the dev bypass in production", () => {
@@ -149,6 +155,57 @@ describe("drive planning", () => {
     }, papers).action).toBe("attach");
     expect(escapeDriveQuery("a'b\\c")).toBe("a\\'b\\\\c");
     expect(sanitizeFilename("bad/name?.pdf")).toBe("bad name .pdf");
-    expect(normalizePrivateKey('"line1\\nline2\\n"')).toBe("line1\nline2\n");
+  });
+});
+
+describe("pdf reading stays outside the worker cpu", () => {
+  it("reads a small mock PDF into summary and body text", async () => {
+    const extracted = await createMockLlm().readPdf({
+      filename: "enzyme.pdf",
+      size: 32,
+      body: null,
+      bytes: new TextEncoder().encode("耐熱性の麹酵素\ndoi 10.1111/mock.1"),
+    });
+    expect(extracted.title).toBe("enzyme");
+    expect(extracted.doi).toBe("10.1111/mock.1");
+    expect(extracted.bodyText).toContain("耐熱性");
+    expect(extracted.summary.length).toBeGreaterThan(0);
+  });
+
+  it("sends a streamed PDF to the Gemini Files API and keeps the bytes out of generateContent", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+        controller.close();
+      },
+    });
+    const extracted = await readPdfFromGemini({
+      filename: "enzyme.pdf",
+      size: 4,
+      body,
+      apiKey: "test-key",
+      model: "gemini-2.5-flash",
+      fetchImpl: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/upload/v1beta/files")) {
+          return new Response("{}", { status: 200, headers: { "x-goog-upload-url": "https://upload.example/put" } });
+        }
+        if (target === "https://upload.example/put") {
+          expect(init?.body).toBe(body);
+          return Response.json({ file: { name: "files/1", uri: "https://generativelanguage.googleapis.com/files/1", state: "ACTIVE" } });
+        }
+        const payload = JSON.parse(String(init?.body)) as { contents: { parts: { file_data?: { file_uri: string }; inline_data?: unknown }[] }[] };
+        expect(payload.contents[0]?.parts[1]?.file_data?.file_uri).toContain("files/1");
+        expect(payload.contents[0]?.parts[1]?.inline_data).toBeUndefined();
+        return Response.json({
+          candidates: [{ content: { parts: [{ text: JSON.stringify({
+            title: "酵素", authors: "", year: 2020, journal: "", doi: "", abstract: "", category: "",
+            background: "", objective: "", methods: "", results: "", discussion: "", summary: "要約", bodyText: "本文",
+          }) }] } }],
+        });
+      },
+    });
+    expect(extracted.title).toBe("酵素");
+    expect(extracted.summary).toBe("要約");
   });
 });

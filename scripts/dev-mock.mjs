@@ -17,7 +17,11 @@ function restore() {
 }
 
 const proc = globalThis.process;
-const child = spawn("npx", ["vite", "dev", "--port", "3000"], { stdio: "inherit", shell: true });
+const child = spawn("npx", ["vite", "dev", "--port", "3000"], {
+  stdio: "inherit",
+  shell: true,
+  env: { ...proc.env, SCI_BRIDGE_LOCAL: "1" },
+});
 const stop = (code) => {
   restore();
   proc.exit(code ?? 0);
