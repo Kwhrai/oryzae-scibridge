@@ -20,7 +20,7 @@
     {
       "binding": "DB",
       "database_name": "scibridge",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "3b221813-3db3-4bf6-8258-ad7380182a55",
       "migrations_dir": "migrations"
     }
   ],

@@ -29,13 +29,9 @@ npx wrangler login
 
 Node.js 22 以上。課金は Workers Paid を想定しています。Free プランの CPU は 1 リクエスト 10ms で、PDF の本文抽出は足りません。Paid の既定は 30 秒で、論文 PDF の抽出と Drive 同期に足ります。
 
-## 3. D1（論文・メモ・ブックマーク）
+## 3. D1（論文・メモ・ブックマーク）— 済
 
-```bash
-npx wrangler d1 create scibridge
-```
-
-表示された `database_id` を `wrangler.jsonc` の `d1_databases[0].database_id` に貼ります。今は仮の `00000000-0000-0000-0000-000000000000` です。このままだとリモートへのデプロイは失敗します。
+データベース `scibridge` は作成済みです（APAC、`database_id` `3b221813-3db3-4bf6-8258-ad7380182a55`）。この ID は `wrangler.jsonc` に入っています。`npx wrangler d1 create` は再実行しないでください。
 
 ```bash
 npm run db:migrate:local
@@ -44,16 +40,9 @@ npm run db:migrate
 
 `migrations/0001_init.sql` がテーブルを作ります。既存 9 件の CSV は、初回アクセスで空のテーブルに入ります。`legacy_id` が同じ行は上書きしないので、メモを直したあとに再起動してもその修正は残ります。
 
-## 4. Vectorize（意味検索）
+## 4. Vectorize（意味検索）— 済
 
-次元と距離はモデルと揃えます。違う値で作ると、検索のときにアプリがエラーにします。
-
-```bash
-npx wrangler vectorize create scibridge-papers --dimensions=768 --metric=cosine
-npx wrangler vectorize create-metadata-index scibridge-papers --property-name=paperId --type=string
-```
-
-バインディング名は `VECTORIZE`、索引名は `scibridge-papers` です。`wrangler.jsonc` に書いてあります。
+索引 `scibridge-papers` は作成済みです（768 次元、cosine）。`paperId`（string）のメタデータ索引もあります。作り直さないでください。バインディング名は `VECTORIZE` で、`wrangler.jsonc` に書いてあります。
 
 ログイン後、一覧の「意味検索の索引」を最後まで押すと、移行した 9 件のベクトルが入ります。Vectorize への書き込みは数秒遅れて検索に出ることがあります。
 
